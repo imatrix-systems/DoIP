@@ -1,6 +1,6 @@
 # DoIP Blob Server
 
-A DoIP (Diagnostics over IP) blob server that receives data blobs from Fleet-Connect-1 devices via ISO 13400-2. Supports dual-platform builds (Ubuntu/Torizon), interactive CLI, daemon mode, self-generated operational scripts, structured logging with file rotation, phone-home reverse SSH tunnels, and an automated 47-test suite.
+A DoIP (Diagnostics over IP) blob server that receives data blobs from Fleet-Connect-1 devices via ISO 13400-2. Supports dual-platform builds (Ubuntu/Torizon), interactive CLI, daemon mode, self-generated operational scripts, structured logging with file rotation, phone-home reverse SSH tunnels, and an automated 53-test suite.
 
 ## Prerequisites
 
@@ -47,7 +47,7 @@ Both platforms compile with `-Wall -Wextra -Wpedantic -std=c11` — zero warning
 # 1. Build
 make
 
-# 2. Run all tests (47 tests: 7 phone-home + 6 discovery + 34 full server)
+# 2. Run all tests (53 tests: 7 phone-home + 6 discovery + 40 full server)
 make ci-test
 
 # 3. Run the server interactively
@@ -381,7 +381,7 @@ If the log file cannot be opened (e.g., `/var` permission denied without root), 
 ### Automated Tests
 
 ```bash
-# All tests (CI mode: phone-home + smoke + full — 47 tests total)
+# All tests (CI mode: phone-home + smoke + full — 53 tests total)
 make ci-test
 
 # Phone-home unit tests (HMAC + handler, no server needed — 7 tests)
@@ -390,7 +390,7 @@ make run-test-phonehome
 # Smoke tests (starts server, 6 discovery + connectivity checks)
 make test
 
-# Full server test suite (transfer, CRC, concurrency — 34 tests)
+# Full server test suite (transfer, CRC, concurrency — 40 tests)
 make test-full
 
 # Config parser tests
@@ -631,7 +631,7 @@ DoIP_Server/
 ├── test/
 │   ├── test_discovery.c          # 6-test discovery suite
 │   ├── test_phonehome.c          # 7-test phone-home + HMAC suite
-│   ├── test_server.c             # 34-test full server suite
+│   ├── test_server.c             # 40-test full server suite
 │   └── test_config.sh            # Config parser tests
 └── docs/
     └── DCU_PhoneHome_Specification.md

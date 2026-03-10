@@ -137,10 +137,10 @@ The C11 standard is used with `_POSIX_C_SOURCE 200809L` for `strtok_r` and POSIX
 | `make test-server` | Build full test binary |
 | `make test-phonehome` | Build phone-home test binary |
 | `make test` | Build + run smoke tests (6 tests) |
-| `make test-full` | Build + run full server tests (34 tests) |
+| `make test-full` | Build + run full server tests (40 tests) |
 | `make run-test-phonehome` | Build + run phone-home tests (7 tests) |
 | `make test-config` | Run config parser tests |
-| `make ci-test` | Run ALL tests (47 total) |
+| `make ci-test` | Run ALL tests (53 total) |
 | `make clean` | Remove all binaries |
 | `make install` | Install server + scripts to `$(DESTDIR)$(PREFIX)` |
 | `make install-systemd` | Install + systemd service units |
@@ -187,7 +187,7 @@ $(DESTDIR)/etc/phonehome/phonehome.conf            # Example phone-home config
 ### Running the Full Test Suite
 
 ```bash
-# Build for Ubuntu and run all 47 tests
+# Build for Ubuntu and run all 53 tests
 make clean && make && make ci-test
 ```
 
@@ -203,7 +203,7 @@ Expected output summary:
 === Results: 40 passed, 0 failed ===
 ```
 
-(Note: 2 timeout tests are skipped in CI mode via `SKIP_TIMEOUT=1`, reducing 36 to 34 counted + 6 smoke.)
+(Note: 2 timeout tests are skipped in CI mode via `SKIP_TIMEOUT=1` but still counted in the 40 total.)
 
 ### Cross-Compiled Binary Testing
 
