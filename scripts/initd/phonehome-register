@@ -1,0 +1,47 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          phonehome-register
+# Required-Start:    $network phonehome-keygen
+# Required-Stop:
+# Default-Start:     2 3 4 5
+# Default-Stop:
+# Short-Description: DCU Phone-Home Bastion registration (one-time)
+# Description:       Registers DCU public key with Bastion server via HTTPS.
+#                    Requires network and completed key generation.
+### END INIT INFO
+
+SCRIPT="/usr/sbin/phonehome-register.sh"
+SENTINEL="/etc/phonehome/.registration_complete"
+KEY_FILE="/etc/phonehome/id_ed25519"
+NAME="phonehome-register"
+
+case "$1" in
+    start)
+        if [ -f "$SENTINEL" ]; then
+            echo "$NAME: already registered, skipping."
+            exit 0
+        fi
+        if [ ! -f "$KEY_FILE" ]; then
+            echo "$NAME: key not yet generated, skipping."
+            exit 1
+        fi
+        echo "Starting $NAME..."
+        "$SCRIPT"
+        ;;
+    stop)
+        # One-shot service, nothing to stop
+        ;;
+    status)
+        if [ -f "$SENTINEL" ]; then
+            echo "$NAME: registered"
+        else
+            echo "$NAME: not yet registered"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status}"
+        exit 1
+        ;;
+esac
+
+exit 0

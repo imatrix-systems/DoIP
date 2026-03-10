@@ -1,0 +1,42 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          phonehome-keygen
+# Required-Start:
+# Required-Stop:
+# Default-Start:     S
+# Default-Stop:
+# Short-Description: DCU Phone-Home SSH key generation (one-time)
+# Description:       Generates ED25519 SSH key pair for phone-home on first boot.
+#                    Must run before network is available.
+### END INIT INFO
+
+SCRIPT="/usr/sbin/phonehome-keygen.sh"
+SENTINEL="/etc/phonehome/.keygen_complete"
+NAME="phonehome-keygen"
+
+case "$1" in
+    start)
+        if [ -f "$SENTINEL" ]; then
+            echo "$NAME: keys already generated, skipping."
+            exit 0
+        fi
+        echo "Starting $NAME..."
+        "$SCRIPT"
+        ;;
+    stop)
+        # One-shot service, nothing to stop
+        ;;
+    status)
+        if [ -f "$SENTINEL" ]; then
+            echo "$NAME: keys generated"
+        else
+            echo "$NAME: keys not yet generated"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|status}"
+        exit 1
+        ;;
+esac
+
+exit 0

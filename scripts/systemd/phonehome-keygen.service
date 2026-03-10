@@ -1,0 +1,15 @@
+[Unit]
+Description=DCU Phone-Home SSH Key Generation (one-time)
+Before=network-pre.target phonehome-register.service
+ConditionPathExists=!/etc/phonehome/.keygen_complete
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/phonehome-keygen.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

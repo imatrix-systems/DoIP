@@ -1,0 +1,18 @@
+[Unit]
+Description=DCU Phone-Home Bastion Registration (one-time)
+After=network-online.target phonehome-keygen.service
+Requires=phonehome-keygen.service
+ConditionPathExists=!/etc/phonehome/.registration_complete
+ConditionPathExists=/etc/phonehome/id_ed25519
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/phonehome-register.sh
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
