@@ -10,6 +10,7 @@
 
 #include "cli.h"
 #include "script_gen.h"
+#include "phonehome_handler.h"
 #include "doip_log.h"
 
 #include <stdio.h>
@@ -17,6 +18,12 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <signal.h>
+#include <sys/stat.h>
+
+#ifndef DOIP_SERVER_VERSION
+#define DOIP_SERVER_VERSION "unknown"
+#endif
 
 /* ============================================================================
  * Helpers
@@ -68,9 +75,16 @@ static void cmd_status(const cli_context_t *ctx)
            "Ubuntu"
 #endif
     );
+    printf("  Version:    %s\n", DOIP_SERVER_VERSION);
     printf("  Clients:    %d / %d\n",
            ctx->client_count,
            ctx->server->config.max_tcp_connections);
+    printf("  Bind:       %s:%u (TCP+UDP)\n",
+           ctx->config->server.bind_address ? ctx->config->server.bind_address : "0.0.0.0",
+           ctx->config->server.tcp_port);
+    printf("  Storage:    %s\n", ctx->config->blob_storage_dir);
+
+    /* Transfer status */
     printf("  Transfer:   %s\n", ctx->transfer_active ? "active" : "none");
     if (ctx->transfer_active) {
         printf("    Progress: %u / %u bytes (block %u)\n",
@@ -79,6 +93,66 @@ static void cmd_status(const cli_context_t *ctx)
                ctx->transfer_block_sequence);
         time_t idle = now - ctx->transfer_last_activity;
         printf("    Idle:     %ld seconds\n", (long)idle);
+    }
+
+    /* Phone-home subsystem status */
+    phonehome_status_t ph;
+    phonehome_get_status(&ph);
+
+    printf("\n  Phone-Home:\n");
+    printf("    Enabled:    %s\n", ph.enabled ? "yes" : "no");
+    if (ph.enabled) {
+        printf("    HMAC:       %s\n", ph.hmac_loaded ? "loaded" : "not loaded");
+        printf("    Bastion:    %s:%u\n", ph.bastion_host, ph.bastion_port ? ph.bastion_port : 22);
+        printf("    SSH User:   %s\n", ph.ssh_user[0] ? ph.ssh_user : "(not set)");
+        printf("    Client Key: %s\n", ph.client_key_installed ? "installed" : "not configured");
+        printf("    Script:     %s\n", ph.connect_script);
+        printf("    Lock File:  %s\n", ph.lock_file);
+
+        /* Check if tunnel is currently active */
+        struct stat lock_st;
+        if (stat(ph.lock_file, &lock_st) == 0) {
+            FILE *lf = fopen(ph.lock_file, "r");
+            if (lf) {
+                int pid = 0;
+                if (fscanf(lf, "%d", &pid) == 1 && pid > 0) {
+                    if (kill(pid, 0) == 0) {
+                        printf("    Tunnel:     ACTIVE (PID %d)\n", pid);
+                    } else {
+                        printf("    Tunnel:     stale lock (PID %d dead)\n", pid);
+                    }
+                }
+                fclose(lf);
+            }
+        } else {
+            printf("    Tunnel:     inactive\n");
+        }
+
+        /* Check key files */
+        struct stat kst;
+        printf("    HMAC File:  %s\n",
+               stat("/etc/phonehome/hmac_secret", &kst) == 0 ? "present" : "missing");
+        printf("    SSH Key:    %s\n",
+               stat("/etc/phonehome/id_ed25519", &kst) == 0 ? "present" : "missing");
+        printf("    Known Hosts:%s\n",
+               stat("/etc/phonehome/known_hosts", &kst) == 0 ? " present" : " missing");
+        printf("    DCU Serial: ");
+        FILE *sf = fopen("/etc/dcu-serial", "r");
+        if (sf) {
+            char sn[32] = {0};
+            if (fgets(sn, sizeof(sn), sf)) {
+                /* Strip newline */
+                size_t sl = strlen(sn);
+                while (sl > 0 && (sn[sl-1] == '\n' || sn[sl-1] == '\r'))
+                    sn[--sl] = '\0';
+                printf("%s\n", sn);
+            } else {
+                printf("(empty)\n");
+            }
+            fclose(sf);
+        } else {
+            printf("missing (/etc/dcu-serial)\n");
+        }
     }
 }
 

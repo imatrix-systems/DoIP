@@ -30,9 +30,18 @@ else
   PLAT_DEF = -DPLATFORM_UBUNTU
 endif
 
+# Auto-versioning: VERSION file has major.minor.patch, BUILD_NUMBER auto-increments
+VERSION    := $(shell cat VERSION 2>/dev/null || echo 0.0.0)
+BUILD_NUM  := $(shell cat BUILD_NUMBER 2>/dev/null || echo 0)
+BUILD_DATE := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+VERSION_STR = $(VERSION).$(BUILD_NUM)
+
 CFLAGS   = -Wall -Wextra -Wpedantic $(OPT) -g -std=c11 $(PLAT_DEF)
 INCLUDES = -Iinclude
 LDFLAGS  = -lpthread
+
+# Version define passed to compiler (only for server target)
+VERSION_DEF = -DDOIP_SERVER_VERSION='"$(VERSION_STR)"' -DDOIP_BUILD_DATE='"$(BUILD_DATE)"'
 
 # Phone-home support (standalone HMAC-SHA256, no external crypto dependency)
 PHONEHOME_SRCS = src/phonehome_handler.c src/hmac_sha256.c
@@ -52,12 +61,16 @@ TEST_PH_TARGET = test-phonehome
 
 PREFIX ?= /usr
 
-.PHONY: all clean test test-config test-full run-test-phonehome ci-test install install-systemd install-initd
+.PHONY: all clean test test-config test-full run-test-phonehome ci-test install install-systemd install-initd version
 
 all: $(SERVER_TARGET) $(TEST_TARGET) $(TEST_SERVER) $(TEST_PH_TARGET)
 
-$(SERVER_TARGET): $(SERVER_SRCS)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ $(LDFLAGS)
+# Increment build number before compiling the server
+$(SERVER_TARGET): $(SERVER_SRCS) VERSION BUILD_NUMBER
+	@NEW_BUILD=$$(( $(BUILD_NUM) + 1 )); \
+	echo $$NEW_BUILD > BUILD_NUMBER; \
+	echo "Building $(SERVER_TARGET) v$(VERSION).$${NEW_BUILD} ($(BUILD_DATE))"; \
+	$(CC) $(CFLAGS) $(INCLUDES) -DDOIP_SERVER_VERSION='"$(VERSION).'$$NEW_BUILD'"' -DDOIP_BUILD_DATE='"$(BUILD_DATE)"' -o $@ $(SERVER_SRCS) $(LDFLAGS)
 
 $(TEST_TARGET): $(TEST_SRCS)
 	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ $(LDFLAGS)
@@ -116,6 +129,9 @@ ci-test: $(SERVER_TARGET) $(TEST_TARGET) $(TEST_SERVER) $(TEST_PH_TARGET)
 	@echo ""
 	@echo "=== Full Server Tests ==="
 	@SKIP_TIMEOUT=1 $(MAKE) test-full
+
+version:
+	@echo "$(VERSION_STR)"
 
 install: all
 	install -D -m 755 $(SERVER_TARGET) $(DESTDIR)$(PREFIX)/sbin/doip-server

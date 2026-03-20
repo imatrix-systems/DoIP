@@ -18,6 +18,11 @@
  * Usage: ./doip-server [-c config_file] [-d] [-v|-vv] [-q|-qq] [-l logfile] [bind_ip] [port]
  */
 
+/* Version injected by Makefile via -DDOIP_SERVER_VERSION=... */
+#ifndef DOIP_SERVER_VERSION
+#define DOIP_SERVER_VERSION "0.0.0-dev"
+#endif
+
 #include "doip.h"
 #include "doip_server.h"
 #include "config.h"
@@ -44,6 +49,7 @@
  * ========================================================================== */
 
 static doip_app_config_t g_app_config;
+static time_t g_server_start_time;   /* For uptime calculation in status queries */
 
 /* ============================================================================
  * CRC-32 (standalone, polynomial 0xEDB88320 — same as zlib/IEEE 802.3)
@@ -381,8 +387,8 @@ static int handle_diagnostic(doip_server_t *server,
 
     uint8_t sid = uds_data[0];
 
-    LOG_DEBUG("UDS request from 0x%04X: SID=0x%02X, len=%u",
-              source_addr, sid, uds_len);
+    LOG_INFO("UDS request from 0x%04X: SID=0x%02X, len=%u",
+             source_addr, sid, uds_len);
 
     int result;
     switch (sid) {
@@ -417,9 +423,21 @@ static int handle_diagnostic(doip_server_t *server,
         break;
 
     case 0x31: /* RoutineControl — phone-home, no transfer mutex */
-        if (uds_len >= 4 && uds_data[1] == 0x01 &&
-            uds_data[2] == 0xF0 && uds_data[3] == 0xA0) {
-            result = phonehome_handle_routine(uds_data, uds_len, response, resp_size);
+        if (uds_len >= 4 && uds_data[1] == 0x01) {
+            uint16_t rid = (uint16_t)((uds_data[2] << 8) | uds_data[3]);
+            if (rid == ROUTINE_ID_PHONEHOME) {
+                result = phonehome_handle_routine(uds_data, uds_len,
+                                                  response, resp_size);
+            } else if (rid == ROUTINE_ID_PHONEHOME_PROVISION) {
+                result = phonehome_handle_provision(uds_data, uds_len,
+                                                    response, resp_size);
+            } else if (rid == ROUTINE_ID_PHONEHOME_STATUS) {
+                result = phonehome_handle_status(uds_data, uds_len,
+                                                  response, resp_size,
+                                                  g_server_start_time);
+            } else {
+                result = build_negative_response(sid, 0x12, response, resp_size);
+            }
         } else {
             result = build_negative_response(sid, 0x12, response, resp_size); /* subFunctionNotSupported */
         }
@@ -611,7 +629,7 @@ static void daemon_signal_parent(bool success)
 
 static void print_usage(const char *prog)
 {
-    fprintf(stderr, "Usage: %s [-c config_file] [-d] [-v|-vv] [-q|-qq] [-l logfile] [bind_ip] [port]\n", prog);
+    fprintf(stderr, "Usage: %s [-c config_file] [-d] [-v|-vv] [-q|-qq] [-l logfile] [--fresh] [bind_ip] [port]\n", prog);
     fprintf(stderr, "\n");
     fprintf(stderr, "  -c config  - Configuration file (default: doip-server.conf in CWD)\n");
     fprintf(stderr, "  -d         - Run as background daemon\n");
@@ -620,6 +638,7 @@ static void print_usage(const char *prog)
     fprintf(stderr, "  -q         - Quiet (ERROR+WARN only)\n");
     fprintf(stderr, "  -qq        - Very quiet (ERROR only)\n");
     fprintf(stderr, "  -l path    - Log file path (default: /var/FC-1-DOIP.log)\n");
+    fprintf(stderr, "  --fresh    - Delete and regenerate all scripts/configs (clean start)\n");
     fprintf(stderr, "  bind_ip    - IP address to bind to (overrides config)\n");
     fprintf(stderr, "  port       - TCP/UDP port (overrides config)\n");
     fprintf(stderr, "\n");
@@ -637,6 +656,7 @@ int main(int argc, char *argv[])
     uint16_t cli_port = 0;
     bool cli_port_set = false;
     bool cli_daemon = false;
+    bool cli_fresh = false;
     int verbosity = DOIP_LOG_INFO;  /* default */
 
     /* Parse arguments */
@@ -689,6 +709,11 @@ int main(int argc, char *argv[])
             i++;
             continue;
         }
+        if (strcmp(argv[i], "--fresh") == 0) {
+            cli_fresh = true;
+            i++;
+            continue;
+        }
         /* Positional: bind_ip then port */
         if (!cli_bind_ip) {
             cli_bind_ip = argv[i];
@@ -707,6 +732,13 @@ int main(int argc, char *argv[])
 
     /* Load configuration BEFORE daemonize (need pid_file path) */
     doip_config_defaults(&g_app_config);
+
+    /*
+     * Auto-create doip-server.conf in CWD if missing (before config load).
+     * The full ensure_defaults (scripts + phonehome config) runs after
+     * logger init so its output is visible in logs.
+     */
+    script_gen_ensure_defaults_config();
 
     if (config_file) {
         if (doip_config_load(&g_app_config, config_file) != 0) {
@@ -753,7 +785,10 @@ int main(int argc, char *argv[])
     }
 
     LOG_INFO("========================================");
-    LOG_INFO(" DoIP Blob Server");
+    LOG_INFO(" DoIP Blob Server v%s", DOIP_SERVER_VERSION);
+#ifdef DOIP_BUILD_DATE
+    LOG_INFO(" Built: %s", DOIP_BUILD_DATE);
+#endif
     LOG_INFO("========================================");
 
     if (config_file) {
@@ -763,6 +798,56 @@ int main(int argc, char *argv[])
     }
 
     doip_config_print(&g_app_config);
+
+    /*
+     * --fresh: delete generated scripts/configs so they get regenerated
+     * from the embedded templates. Ensures on-disk files match the binary.
+     */
+    if (cli_fresh) {
+        LOG_INFO("--fresh: removing generated files for clean regeneration");
+        unlink("/usr/sbin/phonehome-connect.sh");
+        unlink("/usr/sbin/phonehome-keygen.sh");
+        unlink("/usr/sbin/phonehome-register.sh");
+        unlink("/etc/phonehome/phonehome.conf");
+        LOG_INFO("--fresh: removed scripts and phonehome config");
+    }
+
+    /*
+     * Kill any lingering phonehome tunnel processes and clean up.
+     * No tunnel should be active when the server is (re)starting.
+     * Zombies from previous connect script runs are also reaped.
+     */
+    {
+        FILE *lockfp = fopen("/etc/phonehome/phonehome.lock", "r");
+        if (lockfp) {
+            int old_pid = 0;
+            if (fscanf(lockfp, "%d", &old_pid) == 1 && old_pid > 1) {
+                if (kill(old_pid, 0) == 0) {
+                    LOG_INFO("Killing stale phonehome process (PID %d)", old_pid);
+                    kill(old_pid, SIGTERM);
+                    usleep(500000);  /* 500ms grace */
+                    if (kill(old_pid, 0) == 0) {
+                        kill(old_pid, SIGKILL);
+                        LOG_INFO("Force-killed phonehome PID %d", old_pid);
+                    }
+                }
+            }
+            fclose(lockfp);
+        }
+        /* Also kill any orphaned phonehome-connect processes by name */
+        system("pkill -f phonehome-connect 2>/dev/null");
+
+        if (unlink("/etc/phonehome/phonehome.lock") == 0) {
+            LOG_INFO("Removed stale phone-home lock file");
+        }
+    }
+
+    /*
+     * Auto-create missing phone-home scripts and config files.
+     * Runs after logger init so output is visible in logs.
+     * Only creates files that don't exist — never overwrites.
+     */
+    script_gen_ensure_defaults();
 
     /* Initialize phone-home subsystem (optional — failure degrades gracefully) */
     static phonehome_config_t phonehome_cfg;
@@ -778,6 +863,11 @@ int main(int argc, char *argv[])
         }
     } else {
         LOG_INFO("Phone-home not configured (no phonehome_config in doip-server.conf)");
+    }
+
+    /* Ensure SSH service user exists for bastion inbound connections */
+    if (phonehome_cfg.ssh_user[0]) {
+        phonehome_ensure_ssh_user(&phonehome_cfg);
     }
 
     /* Initialize CRC-32 lookup table */
@@ -841,6 +931,7 @@ int main(int argc, char *argv[])
     daemon_signal_parent(true);
 
     time_t start_time = time(NULL);
+    g_server_start_time = start_time;
 
     LOG_INFO("Max blob size: %u bytes (%u MB)",
              g_app_config.blob_max_size, g_app_config.blob_max_size / (1024 * 1024));

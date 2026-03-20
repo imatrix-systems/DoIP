@@ -10,10 +10,10 @@
 
 set -e
 
-BASTION_HOST="${1:-bastion.example.com}"
+BASTION_HOST="${1:-bastion-dev.imatrixsys.com}"
 REMOTE_PORT="${2:-0}"
 NONCE="$3"
-LOCAL_SSH_PORT=22
+LOCAL_SSH_PORT=22222
 PHONEHOME_DIR="/etc/phonehome"
 KEY_FILE="${PHONEHOME_DIR}/id_ed25519"
 KNOWN_HOSTS="${PHONEHOME_DIR}/known_hosts"
@@ -21,20 +21,14 @@ SERIAL_FILE="/etc/dcu-serial"
 DCU_SERIAL=$(cat "$SERIAL_FILE" | tr -d '[:space:]')
 LOG_TAG="phonehome-connect"
 TUNNEL_TIMEOUT=3600
-LOCK_FILE="/var/run/phonehome.lock"
+LOCK_FILE="/etc/phonehome/phonehome.lock"
 
 log() { logger -t "$LOG_TAG" "$1"; }
 
-# Prevent concurrent tunnels
-if [ -f "$LOCK_FILE" ]; then
-    PID=$(cat "$LOCK_FILE")
-    if kill -0 "$PID" 2>/dev/null; then
-        log "Tunnel already active (PID $PID). Ignoring duplicate trigger."
-        exit 0
-    fi
-fi
-
-echo $$ > "$LOCK_FILE"
+# Lock file is managed by the DoIP server (phonehome_handler.c).
+# The server creates the lock with our PID before exec, so we just
+# update it with $$ (same PID) and set the cleanup trap.
+echo "$$" > "$LOCK_FILE"
 trap 'rm -f "$LOCK_FILE"; log "Tunnel closed."' EXIT
 
 log "Phone-home triggered. Serial=$DCU_SERIAL Nonce=$NONCE Bastion=$BASTION_HOST RemotePort=$REMOTE_PORT"
@@ -61,5 +55,5 @@ timeout "$TUNNEL_TIMEOUT" ssh \
     -o BatchMode=yes \
     -o ConnectTimeout=30 \
     -R "${REMOTE_PORT}:localhost:${LOCAL_SSH_PORT}" \
-    "phonehome-${DCU_SERIAL}@${BASTION_HOST}" \
+    "tunnel@${BASTION_HOST}" \
     || log "SSH tunnel exited with code $?"

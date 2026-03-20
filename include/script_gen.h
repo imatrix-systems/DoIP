@@ -39,6 +39,30 @@ int script_gen_write_to(const char *output_dir);
  */
 int script_gen_count(void);
 
+/**
+ * @brief Create doip-server.conf in CWD if missing (pre-logger)
+ *
+ * Called before config load and logger init. Silent on failure.
+ * @return 1 if created, 0 if exists, -1 on error
+ */
+int script_gen_ensure_defaults_config(void);
+
+/**
+ * @brief Ensure all required phone-home files exist with working defaults
+ *
+ * Creates missing files only — never overwrites existing files.
+ * Call after logger init, before phonehome_config_load().
+ *
+ * Files created if missing:
+ *   /etc/phonehome/phonehome.conf    — phone-home configuration
+ *   /usr/sbin/phonehome-connect.sh   — SSH tunnel script (critical)
+ *   /usr/sbin/phonehome-keygen.sh    — SSH key generation script
+ *   /usr/sbin/phonehome-register.sh  — Bastion registration script
+ *
+ * @return Number of files created, or negative on fatal error
+ */
+int script_gen_ensure_defaults(void);
+
 #ifdef __cplusplus
 }
 #endif

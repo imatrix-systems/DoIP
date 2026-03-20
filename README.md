@@ -60,7 +60,7 @@ doip> help
 doip> quit
 ```
 
-The server listens on 127.0.0.1:13400 (TCP + UDP) by default.
+The server listens on 127.0.0.1:13400 (TCP) by default. UDP always binds to `INADDR_ANY` (all interfaces) regardless of `bind_address`, as required for broadcast discovery reception.
 
 ## Usage
 
@@ -316,7 +316,7 @@ script_output_dir   = /etc/doip/scripts
 | `vin` | `FC1BLOBSRV0000001` | 17-char Vehicle Identification Number |
 | `logical_address` | `0x0001` | DoIP entity logical address |
 | `eid` / `gid` | `00:1A:2B:3C:4D:5E` | Entity/Group ID (MAC-like, colon-separated) |
-| `bind_address` | (any) | NULL = INADDR_ANY |
+| `bind_address` | `127.0.0.1` | TCP bind address (`127.0.0.1` in shipped config; override with CLI arg for LAN use). UDP always binds to `INADDR_ANY` for broadcast discovery. |
 | `tcp_port` / `udp_port` | `13400` | Standard DoIP port (ISO 13400) |
 | `max_tcp_connections` | `4` | Maximum simultaneous TCP clients |
 | `max_data_size` | `4096` | DoIP payload size limit |
@@ -495,7 +495,7 @@ phonehome_config = /etc/phonehome/phonehome.conf
 The phone-home config (`/etc/phonehome/phonehome.conf`):
 
 ```ini
-BASTION_HOST=bastion.example.com
+BASTION_HOST=bastion-dev.imatrixsys.com
 HMAC_SECRET_FILE=/etc/phonehome/hmac_secret
 CONNECT_SCRIPT=/usr/sbin/phonehome-connect.sh
 LOCK_FILE=/var/run/phonehome.lock
@@ -505,7 +505,7 @@ LOCK_FILE=/var/run/phonehome.lock
 |-----|----------|-------------|
 | `HMAC_SECRET_FILE` | Yes | Path to 32-byte HMAC secret (must be 0600, not world-readable) |
 | `CONNECT_SCRIPT` | Yes | Path to the SSH tunnel script |
-| `BASTION_HOST` | No | Default bastion hostname (default: `bastion.example.com`) |
+| `BASTION_HOST` | No | Default bastion hostname (default: `bastion-dev.imatrixsys.com`) |
 | `LOCK_FILE` | No | Tunnel lock file path (default: `/var/run/phonehome.lock`) |
 
 ### Phone-Home UDS PDU Format
@@ -638,6 +638,13 @@ DoIP_Server/
 ```
 
 ## Troubleshooting
+
+**UDP discovery not working (clients can't find server):**
+The default config ships with `bind_address = 127.0.0.1`, which restricts TCP to localhost only. For LAN discovery, override the bind address via CLI:
+```bash
+./doip-server -c doip-server.conf 0.0.0.0 13400
+```
+UDP discovery always binds to `INADDR_ANY` regardless of the config `bind_address`, so broadcast reception works automatically. If TCP connections from remote clients are refused, the bind address is the most likely cause.
 
 **Port already in use:**
 ```

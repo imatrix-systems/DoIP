@@ -175,7 +175,7 @@ Both scripts have proper LSB `### BEGIN/END INIT INFO` blocks, `Provides:` names
 
 Contents of `etc/phonehome/phonehome.conf`:
 ```
-BASTION_HOST=bastion.example.com
+BASTION_HOST=bastion-dev.imatrixsys.com
 BASTION_PORT=22
 TUNNEL_TIMEOUT=3600
 RETRY_ON_DISCONNECT=0
@@ -188,7 +188,7 @@ LOCK_FILE=/var/run/phonehome.lock
 
 Cross-referencing with `phonehome_config_load()` in `phonehome_handler.c`:
 - **Required keys:** `HMAC_SECRET_FILE` (present, line 10), `CONNECT_SCRIPT` (present, line 11). Both have reasonable production paths.
-- **Optional keys with defaults:** `BASTION_HOST` (present, placeholder `bastion.example.com` matches code default), `LOCK_FILE` (present, `/var/run/phonehome.lock` matches code default).
+- **Optional keys with defaults:** `BASTION_HOST` (present, placeholder `bastion-dev.imatrixsys.com` matches code default), `LOCK_FILE` (present, `/var/run/phonehome.lock` matches code default).
 - **Shell-script-only keys:** `BASTION_PORT`, `TUNNEL_TIMEOUT`, `RETRY_ON_DISCONNECT`, `LOG_LEVEL`, `DOIP_SOURCE_ADDR` -- the C parser ignores these (line 168 comment: "Ignore other keys...used by shell scripts"). Their presence is correct for the shell scripts that source this file.
 
 All values are reasonable:

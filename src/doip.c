@@ -80,7 +80,7 @@ doip_result_t doip_validate_header(const doip_header_t *header)
         return DOIP_ERR_INVALID_PARAM;
 
     /* Check version / inverse version match */
-    if ((header->protocol_version ^ 0xFF) != header->inverse_version)
+    if ((header->protocol_version ^ header->inverse_version) != 0xFF)
         return DOIP_ERR_INVALID_HEADER;
 
     /* Check payload length is reasonable */

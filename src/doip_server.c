@@ -11,6 +11,7 @@
  */
 
 #include "doip_server.h"
+#include "doip_log.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,7 +35,7 @@ static int tcp_recv_exact(int fd, uint8_t *buf, size_t len, int timeout_ms)
 
     while (received < len) {
         if (fd >= FD_SETSIZE) {
-            fprintf(stderr, "[DoIP Server] fd %d exceeds FD_SETSIZE\n", fd);
+            LOG_ERROR("fd %d exceeds FD_SETSIZE", fd);
             return DOIP_ERR_RECV;
         }
         FD_ZERO(&fds);
@@ -110,7 +111,7 @@ static void *client_handler_thread(void *arg)
 
     char peer_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &conn->peer_addr.sin_addr, peer_ip, sizeof(peer_ip));
-    printf("[DoIP Server] Client connected: %s:%d (fd=%d)\n",
+    LOG_INFO("Client connected: %s:%d (fd=%d)",
            peer_ip, ntohs(conn->peer_addr.sin_port), conn->fd);
 
     uint8_t recv_buf[DOIP_HEADER_SIZE + DOIP_MAX_DIAGNOSTIC_SIZE];
@@ -122,7 +123,7 @@ static void *client_handler_thread(void *arg)
         if (ret == DOIP_ERR_TIMEOUT)
             continue;
         if (ret < 0) {
-            printf("[DoIP Server] Client fd=%d receive error: %s\n",
+            LOG_WARN("Client fd=%d receive error: %s",
                    conn->fd, doip_result_str((doip_result_t)ret));
             break;
         }
@@ -172,7 +173,7 @@ static void *client_handler_thread(void *arg)
             continue;
         }
 
-        printf("[DoIP Server] Received from fd=%d: %s\n",
+        LOG_INFO("Received from fd=%d: %s",
                conn->fd, doip_payload_type_str((doip_payload_type_t)msg.header.payload_type));
 
         /* Handle message by type */
@@ -207,7 +208,7 @@ static void *client_handler_thread(void *arg)
             if (response_code == DOIP_ROUTING_ACTIVATION_SUCCESS) {
                 conn->routing_activated = true;
                 conn->tester_address = req->source_address;
-                printf("[DoIP Server] Routing activated for tester 0x%04X on fd=%d\n",
+                LOG_INFO("Routing activated for tester 0x%04X on fd=%d",
                        req->source_address, conn->fd);
             }
             break;
@@ -218,7 +219,7 @@ static void *client_handler_thread(void *arg)
 
             /* Verify routing is activated */
             if (!conn->routing_activated) {
-                printf("[DoIP Server] Diagnostic msg rejected - routing not active\n");
+                LOG_WARN("Diagnostic msg rejected - routing not active");
                 break;
             }
 
@@ -272,7 +273,7 @@ static void *client_handler_thread(void *arg)
         }
 
         case DOIP_TYPE_ALIVE_CHECK_RESPONSE:
-            printf("[DoIP Server] Alive check response from tester 0x%04X\n",
+            LOG_INFO("Alive check response from tester 0x%04X",
                    msg.payload.alive_check.source_address);
             break;
 
@@ -316,7 +317,7 @@ static void *client_handler_thread(void *arg)
     }
 
     /* Cleanup */
-    printf("[DoIP Server] Client disconnected: fd=%d\n", conn->fd);
+    LOG_INFO("Client disconnected: fd=%d", conn->fd);
     close(conn->fd);
 
     pthread_mutex_lock(&server->clients_mutex);
@@ -338,13 +339,13 @@ static void *tcp_accept_thread(void *arg)
 {
     doip_server_t *server = (doip_server_t *)arg;
 
-    printf("[DoIP Server] TCP accept thread started on port %u\n",
+    LOG_INFO("TCP accept thread started on port %u",
            server->config.tcp_port ? server->config.tcp_port : DOIP_TCP_DATA_PORT);
 
     while (server->running) {
         /* Use select with timeout to allow checking server->running */
         if (server->tcp_fd >= FD_SETSIZE) {
-            fprintf(stderr, "[DoIP Server] tcp_fd %d exceeds FD_SETSIZE\n", server->tcp_fd);
+            LOG_ERROR("tcp_fd %d exceeds FD_SETSIZE", server->tcp_fd);
             break;
         }
         fd_set fds;
@@ -381,7 +382,7 @@ static void *tcp_accept_thread(void *arg)
 
         if (slot < 0 || server->num_clients >= server->config.max_tcp_connections) {
             pthread_mutex_unlock(&server->clients_mutex);
-            printf("[DoIP Server] Max clients reached, rejecting connection\n");
+            LOG_WARN("Max clients reached, rejecting connection");
             close(client_fd);
             continue;
         }
@@ -430,7 +431,7 @@ static void *udp_handler_thread(void *arg)
 {
     doip_server_t *server = (doip_server_t *)arg;
 
-    printf("[DoIP Server] UDP handler thread started on port %u\n",
+    LOG_INFO("UDP handler thread started on port %u",
            server->config.udp_port ? server->config.udp_port : DOIP_UDP_DISCOVERY_PORT);
 
     uint8_t recv_buf[512];
@@ -442,7 +443,7 @@ static void *udp_handler_thread(void *arg)
 
         /* Use select for timeout */
         if (server->udp_fd >= FD_SETSIZE) {
-            fprintf(stderr, "[DoIP Server] udp_fd %d exceeds FD_SETSIZE\n", server->udp_fd);
+            LOG_ERROR("udp_fd %d exceeds FD_SETSIZE", server->udp_fd);
             break;
         }
         fd_set fds;
@@ -466,7 +467,7 @@ static void *udp_handler_thread(void *arg)
         char peer_ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &from_addr.sin_addr, peer_ip, sizeof(peer_ip));
 
-        printf("[DoIP Server] UDP from %s:%d: %s\n",
+        LOG_INFO("UDP from %s:%d: %s",
                peer_ip, ntohs(from_addr.sin_port),
                doip_payload_type_str((doip_payload_type_t)msg.header.payload_type));
 
@@ -621,8 +622,15 @@ doip_result_t doip_server_start(doip_server_t *server)
     int broadcast = 1;
     setsockopt(server->udp_fd, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
 
-    addr.sin_port = htons(server->config.udp_port);
-    if (bind(server->udp_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    /* UDP must bind to INADDR_ANY to receive broadcast packets (255.255.255.255).
+     * Binding to a specific IP would silently drop broadcast discovery requests.
+     * TCP stays bound to bind_address for connection filtering. */
+    struct sockaddr_in udp_addr;
+    memset(&udp_addr, 0, sizeof(udp_addr));
+    udp_addr.sin_family = AF_INET;
+    udp_addr.sin_addr.s_addr = INADDR_ANY;
+    udp_addr.sin_port = htons(server->config.udp_port);
+    if (bind(server->udp_fd, (struct sockaddr *)&udp_addr, sizeof(udp_addr)) < 0) {
         perror("[DoIP Server] UDP bind");
         close(server->tcp_fd);
         close(server->udp_fd);
@@ -650,7 +658,7 @@ doip_result_t doip_server_start(doip_server_t *server)
         return DOIP_ERR_SOCKET;
     }
 
-    printf("[DoIP Server] Started (TCP:%u, UDP:%u, LogAddr:0x%04X)\n",
+    LOG_INFO("Started (TCP:%u, UDP:%u, LogAddr:0x%04X)",
            server->config.tcp_port, server->config.udp_port,
            server->config.logical_address);
 
@@ -662,7 +670,7 @@ void doip_server_stop(doip_server_t *server)
     if (!server || !server->running)
         return;
 
-    printf("[DoIP Server] Stopping...\n");
+    LOG_INFO("Stopping...");
     server->running = false;
 
     /* Close listening sockets to unblock accept/recvfrom */
@@ -706,7 +714,7 @@ void doip_server_stop(doip_server_t *server)
     server->num_clients = 0;
     pthread_mutex_unlock(&server->clients_mutex);
 
-    printf("[DoIP Server] Stopped\n");
+    LOG_INFO("Stopped");
 }
 
 void doip_server_destroy(doip_server_t *server)

@@ -135,7 +135,7 @@ static const char REGISTER_SCRIPT[] =
 "SENTINEL=\"${PHONEHOME_DIR}/.registration_complete\"\n"
 "SERIAL_FILE=\"/etc/dcu-serial\"\n"
 "FC1_SERIAL_FILE=\"/etc/fc1-serial\"\n"
-"BASTION_REG_URL=\"https://bastion.example.com/api/v1/devices/register\"\n"
+"BASTION_REG_URL=\"https://bastion-dev.imatrixsys.com/api/v1/devices/register\"\n"
 "PROVISIONING_TOKEN_FILE=\"${PHONEHOME_DIR}/provisioning_token\"\n"
 "CA_CERT=\"/etc/phonehome/bastion-ca.crt\"\n"
 "MAX_RETRIES=10\n"
@@ -200,7 +200,7 @@ static const char REGISTER_SCRIPT[] =
 "SENTINEL=\"${PHONEHOME_DIR}/.registration_complete\"\n"
 "SERIAL_FILE=\"/etc/dcu-serial\"\n"
 "FC1_SERIAL_FILE=\"/etc/fc1-serial\"\n"
-"BASTION_REG_URL=\"https://bastion.example.com/api/v1/devices/register\"\n"
+"BASTION_REG_URL=\"https://bastion-dev.imatrixsys.com/api/v1/devices/register\"\n"
 "PROVISIONING_TOKEN_FILE=\"${PHONEHOME_DIR}/provisioning_token\"\n"
 "CA_CERT=\"/etc/phonehome/bastion-ca.crt\"\n"
 "MAX_RETRIES=10\n"
@@ -268,7 +268,7 @@ static const char CONNECT_SCRIPT[] =
 "# Called with: phonehome-connect.sh <bastion_host> <remote_port> <nonce>\n"
 "set -e\n"
 "\n"
-"BASTION_HOST=\"${1:-bastion.example.com}\"\n"
+"BASTION_HOST=\"${1:-bastion-dev.imatrixsys.com}\"\n"
 "REMOTE_PORT=\"${2:-0}\"\n"
 "NONCE=\"$3\"\n"
 "LOCAL_SSH_PORT=22\n"
@@ -279,19 +279,14 @@ static const char CONNECT_SCRIPT[] =
 "DCU_SERIAL=$(cat \"$SERIAL_FILE\" | tr -d '[:space:]')\n"
 "LOG_TAG=\"phonehome-connect\"\n"
 "TUNNEL_TIMEOUT=3600\n"
-"LOCK_FILE=\"/var/run/phonehome.lock\"\n"
+"LOCK_FILE=\"/etc/phonehome/phonehome.lock\"\n"
 "\n"
 "log() { logger -t \"$LOG_TAG\" \"$1\"; }\n"
 "\n"
-"if [ -f \"$LOCK_FILE\" ]; then\n"
-"    PID=$(cat \"$LOCK_FILE\")\n"
-"    if kill -0 \"$PID\" 2>/dev/null; then\n"
-"        log \"Tunnel already active (PID $PID). Ignoring duplicate trigger.\"\n"
-"        exit 0\n"
-"    fi\n"
-"fi\n"
-"\n"
-"echo $$ > \"$LOCK_FILE\"\n"
+"# Lock file is managed by the DoIP server (phonehome_handler.c).\n"
+"# The server creates the lock with our PID before exec, so we just\n"
+"# update it with $$ (same PID) and set the cleanup trap.\n"
+"echo \"$$\" > \"$LOCK_FILE\"\n"
 "trap 'rm -f \"$LOCK_FILE\"; log \"Tunnel closed.\"' EXIT\n"
 "\n"
 "log \"Phone-home triggered. Serial=$DCU_SERIAL Nonce=$NONCE Bastion=$BASTION_HOST RemotePort=$REMOTE_PORT\"\n"
@@ -310,7 +305,7 @@ static const char CONNECT_SCRIPT[] =
 "    -o BatchMode=yes \\\n"
 "    -o ConnectTimeout=30 \\\n"
 "    -R \"${REMOTE_PORT}:localhost:${LOCAL_SSH_PORT}\" \\\n"
-"    \"phonehome-${DCU_SERIAL}@${BASTION_HOST}\" \\\n"
+"    \"tunnel@${BASTION_HOST}\" \\\n"
 "    || log \"SSH tunnel exited with code $?\"\n";
 
 /* ============================================================================
@@ -387,6 +382,59 @@ static const char DOIP_INITD_SCRIPT[] =
 "esac\n"
 "\n"
 "exit 0\n";
+
+/* ============================================================================
+ * Embedded Config — Phone-Home Default Config
+ * ========================================================================== */
+
+static const char PHONEHOME_CONF_DEFAULT[] =
+"# DCU Phone-Home Configuration\n"
+"# See DCU_PhoneHome_Specification.md Section 9.1\n"
+"\n"
+"BASTION_HOST=bastion-dev.imatrixsys.com\n"
+"BASTION_PORT=22\n"
+"TUNNEL_TIMEOUT=3600\n"
+"RETRY_ON_DISCONNECT=0\n"
+"LOG_LEVEL=info\n"
+"DOIP_SOURCE_ADDR=0x0001\n"
+"HMAC_SECRET_FILE=/etc/phonehome/hmac_secret\n"
+"CONNECT_SCRIPT=/usr/sbin/phonehome-connect.sh\n"
+"LOCK_FILE=/etc/phonehome/phonehome.lock\n"
+"SSH_USER=imatrix\n"
+"# Bastion SSH client public key — installed in /home/<SSH_USER>/.ssh/authorized_keys\n"
+"# Get from: sudo docker exec web-ssh-bastion-web-1 cat /opt/web-ssh-bastion/bastion_key.pub\n"
+"BASTION_CLIENT_KEY=\n";
+
+/* ============================================================================
+ * Embedded Config — DoIP Server Default Config
+ * ========================================================================== */
+
+static const char DOIP_SERVER_CONF_DEFAULT[] =
+"# DoIP Server Configuration\n"
+"\n"
+"# Identity\n"
+"vin                 = APTERADOIPSRV0001\n"
+"logical_address     = 0x0001\n"
+"eid                 = 00:1A:2B:3C:4D:5E\n"
+"gid                 = 00:1A:2B:3C:4D:5E\n"
+"further_action      = 0x00\n"
+"vin_gid_sync_status = 0x00\n"
+"\n"
+"# Network\n"
+"# bind_address: 0.0.0.0 = all interfaces (required for DoIP discovery)\n"
+"bind_address        = 0.0.0.0\n"
+"tcp_port            = 13400\n"
+"udp_port            = 13400\n"
+"max_tcp_connections = 4\n"
+"max_data_size       = 4096\n"
+"\n"
+"# Blob Storage\n"
+"blob_storage_dir    = /tmp/doip_blobs\n"
+"blob_max_size       = 16777216\n"
+"transfer_timeout    = 30\n"
+"\n"
+"# Phone-Home (auto-generated config)\n"
+"phonehome_config    = /etc/phonehome/phonehome.conf\n";
 
 /* ============================================================================
  * Script Table
@@ -500,5 +548,110 @@ int script_gen_write_to(const char *output_dir)
 int script_gen_count(void)
 {
     return SCRIPT_COUNT;
+}
+
+/* ============================================================================
+ * Auto-Provisioning — ensure all required files exist with working defaults
+ * ========================================================================== */
+
+/**
+ * Write content to path only if it doesn't already exist.
+ * Creates parent directories as needed.
+ * Returns: 1 = created, 0 = already exists, -1 = error.
+ */
+static int write_if_missing(const char *path, const char *content, mode_t mode)
+{
+    struct stat st;
+    if (stat(path, &st) == 0)
+        return 0;  /* Already exists */
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0);
+    if (fd < 0) {
+        if (errno == EEXIST) return 0;  /* Race: created between stat and open */
+        LOG_WARN("ensure_defaults: cannot create %s: %s", path, strerror(errno));
+        return -1;
+    }
+
+    if (fchmod(fd, mode) != 0) {
+        LOG_WARN("ensure_defaults: fchmod %s failed: %s", path, strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    size_t len = strlen(content);
+    const char *p = content;
+    while (len > 0) {
+        ssize_t w = write(fd, p, len);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            LOG_WARN("ensure_defaults: write to %s failed: %s", path, strerror(errno));
+            close(fd);
+            return -1;
+        }
+        p += w;
+        len -= (size_t)w;
+    }
+
+    close(fd);
+    return 1;
+}
+
+int script_gen_ensure_defaults_config(void)
+{
+    /* Create doip-server.conf in CWD only — runs before logger init */
+    return write_if_missing("doip-server.conf",
+                            DOIP_SERVER_CONF_DEFAULT, 0644);
+}
+
+int script_gen_ensure_defaults(void)
+{
+    int created = 0;
+    int r;
+
+    /* 1. /etc/phonehome/ directory */
+    if (ensure_dir("/etc/phonehome") != 0) {
+        LOG_WARN("ensure_defaults: cannot create /etc/phonehome/ — "
+                 "phone-home scripts will not be auto-deployed");
+    } else {
+        /* Tighten permissions on the directory */
+        chmod("/etc/phonehome", 0700);
+    }
+
+    /* 2. Phone-home config file */
+    r = write_if_missing("/etc/phonehome/phonehome.conf",
+                         PHONEHOME_CONF_DEFAULT, 0644);
+    if (r > 0) {
+        LOG_INFO("ensure_defaults: created /etc/phonehome/phonehome.conf");
+        created++;
+    }
+
+    /* 3. Connect script (critical — this was the missing piece) */
+    r = write_if_missing("/usr/sbin/phonehome-connect.sh",
+                         CONNECT_SCRIPT, 0755);
+    if (r > 0) {
+        LOG_INFO("ensure_defaults: created /usr/sbin/phonehome-connect.sh");
+        created++;
+    }
+
+    /* 4. Keygen script */
+    r = write_if_missing("/usr/sbin/phonehome-keygen.sh",
+                         KEYGEN_SCRIPT, 0755);
+    if (r > 0) {
+        LOG_INFO("ensure_defaults: created /usr/sbin/phonehome-keygen.sh");
+        created++;
+    }
+
+    /* 5. Register script */
+    r = write_if_missing("/usr/sbin/phonehome-register.sh",
+                         REGISTER_SCRIPT, 0755);
+    if (r > 0) {
+        LOG_INFO("ensure_defaults: created /usr/sbin/phonehome-register.sh");
+        created++;
+    }
+
+    if (created > 0)
+        LOG_INFO("ensure_defaults: auto-created %d missing file(s)", created);
+
+    return created;
 }
 
