@@ -1,0 +1,18 @@
+graph LR
+    DCU["DCU"]
+    FC1["FC-1"]
+    BASTION["Bastion"]
+    OPERATOR["Operator"]
+    BACKEND["Backend"]
+
+    DCU <-->|"Boundary A<br/>Local LAN, DoIP<br/>HMAC Auth"| FC1
+    FC1 <-->|"Boundary B<br/>4G Internet<br/>SSH Mutual Key Auth"| BASTION
+    DCU <-->|"Boundary C<br/>4G via FC-1 NAT<br/>SSH Mutual Key Auth"| BASTION
+    OPERATOR <-->|"Boundary D<br/>HTTPS + SSH<br/>Credential Auth"| BASTION
+    BACKEND <-->|"Boundary E<br/>Internal Network<br/>mTLS"| BASTION
+
+    style DCU fill:#fce4ec,stroke:#E91E63
+    style FC1 fill:#e8f5e9,stroke:#4CAF50
+    style BASTION fill:#e8f4fd,stroke:#2196F3
+    style OPERATOR fill:#fff9c4,stroke:#FFC107
+    style BACKEND fill:#f3e5f5,stroke:#9C27B0

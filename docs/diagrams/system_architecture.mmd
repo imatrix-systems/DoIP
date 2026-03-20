@@ -1,0 +1,32 @@
+graph TB
+    subgraph CLOUD["CLOUD"]
+        UI["Operator<br/>Web UI"]
+        BACKEND["Backend /<br/>CoAP Server"]
+        BASTION["Bastion SSH<br/>Server :22"]
+    end
+
+    subgraph VEHICLE["VEHICLE"]
+        subgraph FC1["FC-1 (BusyBox, 4G)"]
+            NAT["NAT Gateway"]
+            RELAY["Signal Relay<br/>Agent"]
+            FC1_TUNNEL["SSH Reverse<br/>Tunnel"]
+        end
+        subgraph DCU["DCU (Ubuntu/BusyBox)"]
+            DOIP["DoIP Server"]
+            HANDLER["Phone-Home<br/>Handler"]
+            DCU_TUNNEL["SSH Reverse<br/>Tunnel"]
+        end
+    end
+
+    UI -->|"REST/CoAP"| BACKEND
+    BACKEND -->|"CoAP POST<br/>/remote_call_home/{sn}"| RELAY
+    FC1_TUNNEL <-->|"Existing rev. tunnel<br/>FC1@bastion"| BASTION
+    DCU_TUNNEL <-->|"New DCU rev. tunnel<br/>tunnel@bastion"| BASTION
+    RELAY -->|"DoIP RoutineControl<br/>0x31/0xF0A0"| HANDLER
+    NAT -->|"NAT/MASQUERADE"| DCU_TUNNEL
+    HANDLER --> DCU_TUNNEL
+
+    style CLOUD fill:#e8f4fd,stroke:#2196F3
+    style VEHICLE fill:#fff3e0,stroke:#FF9800
+    style FC1 fill:#e8f5e9,stroke:#4CAF50
+    style DCU fill:#fce4ec,stroke:#E91E63

@@ -1,0 +1,42 @@
+flowchart TD
+    A["Incoming UDS Request<br/>SID=0x31, subFunc=0x01"] --> B{routineId?}
+
+    B -->|"0xF0A0<br/>Phone-Home Trigger"| C["Copy HMAC secret<br/>under hmac_mutex"]
+    B -->|"0xF0A1<br/>Provisioning"| P["Validate PDU length >= 40"]
+    B -->|"0xF0A2<br/>Status Query"| S["Check provisioning state"]
+    B -->|"Other"| X["NRC 0x31<br/>subFunctionNotSupported"]
+
+    C --> D{HMAC loaded?}
+    D -->|No| D1["NRC 0x22<br/>conditionsNotCorrect"]
+    D -->|Yes| E{PDU length >= 44?}
+    E -->|No| E1["NRC 0x13<br/>incorrectMsgLength"]
+    E -->|Yes| F["Compute expected HMAC<br/>HMAC-SHA256(secret, nonce [+ args])"]
+    F --> G{HMAC match?<br/>constant-time compare}
+    G -->|No| G1["NRC 0x35<br/>invalidKey"]
+    G -->|Yes| H{Nonce in<br/>replay cache?}
+    H -->|Yes| H1["NRC 0x24<br/>requestSequenceError"]
+    H -->|No| I["Record nonce in cache<br/>Parse bastion_host + port"]
+    I --> J{Lock file<br/>active?}
+    J -->|Yes| J1["NRC 0x21<br/>busyRepeatRequest"]
+    J -->|No| K["Create lock file<br/>Fork + exec connect script"]
+    K --> L["Positive Response 0x71<br/>routineRunning"]
+
+    P --> P1{CAN SN valid?}
+    P1 -->|No| P2["NRC 0x31<br/>requestOutOfRange"]
+    P1 -->|Yes| P3["Write HMAC to disk<br/>Extract bastion + client key<br/>Setup SSH user<br/>Generate SSH keypair"]
+    P3 --> P4["Positive Response 0x71<br/>+ DCU public key"]
+
+    S --> S1["Build status byte<br/>0x00=OK, 0x01=no HMAC<br/>0x02=no key, 0x03=no SSH"]
+    S1 --> S2["Response: status +<br/>uptime + tunnel state"]
+
+    style A fill:#e3f2fd,stroke:#1565C0
+    style L fill:#e8f5e9,stroke:#2E7D32
+    style P4 fill:#e8f5e9,stroke:#2E7D32
+    style S2 fill:#e8f5e9,stroke:#2E7D32
+    style D1 fill:#ffebee,stroke:#c62828
+    style E1 fill:#ffebee,stroke:#c62828
+    style G1 fill:#ffebee,stroke:#c62828
+    style H1 fill:#ffebee,stroke:#c62828
+    style J1 fill:#ffebee,stroke:#c62828
+    style X fill:#ffebee,stroke:#c62828
+    style P2 fill:#ffebee,stroke:#c62828

@@ -1,0 +1,33 @@
+sequenceDiagram
+    participant OP as Operator
+    participant WEB as Web UI
+    participant BASTION as Bastion
+    participant COAP as CoAP Server
+    participant FC1 as FC-1
+    participant DCU as DCU
+
+    OP->>WEB: Click "Connect to DCU"
+    WEB->>BASTION: POST /api/v1/devices/{sn}/phone-home
+    BASTION->>COAP: POST /api/v1/remote-access/trigger/{sn}
+    COAP->>FC1: CoAP POST /remote_call_home/{can_sn}<br/>(over DTLS)
+
+    Note over FC1: CoAP handler sets<br/>dcu_phonehome_triggered flag
+    FC1->>FC1: Generate 8-byte nonce<br/>Compute HMAC-SHA256
+
+    FC1->>DCU: DoIP RoutineControl 0x31<br/>routineId 0xF0A0<br/>[nonce + HMAC + bastion_host:port]
+
+    DCU->>DCU: Verify HMAC<br/>Check replay cache<br/>Validate hostname
+    DCU-->>FC1: Positive Response 0x71<br/>(routineRunning)
+
+    DCU->>DCU: Fork phonehome-connect.sh
+
+    DCU->>BASTION: SSH reverse tunnel<br/>-R 10008:localhost:22<br/>tunnel@bastion
+
+    Note over BASTION: Tunnel port 10008 active
+
+    WEB->>BASTION: GET /tunnel-status
+    BASTION-->>WEB: status: connected, port: 10008
+
+    OP->>BASTION: SSH -p 10008 greg@localhost
+    BASTION->>DCU: Forward through reverse tunnel
+    DCU-->>OP: Shell prompt

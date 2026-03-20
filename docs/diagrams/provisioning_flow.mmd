@@ -1,0 +1,33 @@
+sequenceDiagram
+    participant FC1 as FC-1
+    participant DCU as DCU (DoIP Server)
+    participant BASTION as Bastion Server
+
+    Note over FC1: First Boot
+    FC1->>FC1: 1. Generate HMAC secret<br/>(32 bytes /dev/urandom)
+    FC1->>FC1: 2. Generate ED25519 SSH key
+
+    Note over FC1: Network Online
+    FC1->>BASTION: 3. POST /api/v1/devices/{sn}/pubkey<br/>(Register SSH public key)
+    BASTION-->>FC1: tunnel_port assigned +<br/>bastion_pubkey + bastion_client_key
+
+    FC1->>FC1: Save bastion host key<br/>to known_hosts
+
+    Note over FC1,DCU: LAN Discovery
+    FC1->>DCU: 4. DoIP UDP broadcast<br/>(Vehicle ID Request, bind eth0)
+    DCU-->>FC1: Vehicle Announcement
+
+    FC1->>DCU: 5. DoIP TCP connect<br/>(Routing Activation)
+    DCU-->>FC1: Routing Ack
+
+    FC1->>DCU: 6. UDS RoutineControl 0xF0A1<br/>[CAN_SN + HMAC + bastion_host +<br/>bastion_client_key]
+    DCU->>DCU: Store HMAC to flash<br/>Create imatrix user<br/>Install bastion client key<br/>Generate SSH keypair
+    DCU-->>FC1: Positive Response 0x71<br/>[DCU SSH public key]
+
+    FC1->>FC1: 7. Enable NAT/MASQUERADE<br/>(eth0 -> wlan0/ppp0)
+
+    FC1->>BASTION: 8. Register DCU pubkey<br/>POST /api/v1/devices/{can_sn}/pubkey
+    BASTION-->>FC1: DCU tunnel_port assigned
+
+    FC1->>BASTION: 9. Auto-connect persistent<br/>reverse SSH tunnel<br/>-R port:localhost:22222
+    Note over BASTION: Device shows ONLINE

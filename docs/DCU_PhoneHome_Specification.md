@@ -80,57 +80,11 @@ This document is intended for developers implementing the solution. It assumes f
 
 ### 3.1 High-Level Topology
 
-```
- ┌─────────────────────────────────────────────────────────────────────────────┐
- │  CLOUD                                                                      │
- │                                                                             │
- │  ┌──────────────┐   REST/CoAP    ┌──────────────────┐                       │
- │  │  Operator    │───────────────►│  Backend /        │                      │
- │  │  Web UI      │                │  CoAP Server      │                      │
- │  └──────────────┘                └────────┬─────────┘                       │
- │                                           │ POST /signals/wake              │
- │                                           ▼                                 │
- │                                 ┌──────────────────┐                        │
- │                                 │  Bastion SSH     │                        │
- │                                 │  Server          │                        │
- │                                 │  (port 22)       │                        │
- │                                 └────────┬─────────┘                        │
- └──────────────────────────────────────────┼──────────────────────────────────┘
-                                   4G / Internet
-             ┌─────────────────────────────┤
-             │ existing rev. tunnel        │ new DCU rev. tunnel
-             │ FC1-XXXXXX@bastion          │ DCU-XXXXXX@bastion
-             ▼                             ▼
- ┌────────────────────────────────────────────────────────┐
- │  VEHICLE                                               │
- │                                                        │
- │  ┌──────────────────────────────────────┐              │
- │  │  FC-1  (BusyBox, 4G)                 │              │
- │  │  - NAT Gateway                       │              │
- │  │  - SSH reverse tunnel → Bastion      │              │
- │  │  - Signal Relay Agent (new)          │              │
- │  └──────────────────┬───────────────────┘              │
- │                     │ DoIP over local LAN              │
- │                     │ (RoutineControl 0x31/0xF0A0)     │
- │                     ▼                                  │
- │  ┌──────────────────────────────────────┐              │
- │  │  DCU  (Ubuntu/BusyBox, embedded)     │              │
- │  │  - DoIP Server (existing)            │              │
- │  │  - Phone-Home Service Handler (new)  │              │
- │  │  - SSH reverse tunnel → Bastion      │              │
- │  └──────────────────────────────────────┘              │
- └────────────────────────────────────────────────────────┘
-```
+![System Architecture](diagrams/system_architecture.png)
 
 ### 3.2 Trust Boundaries
 
-```
- Boundary A:  DCU ↔ FC-1  (local LAN, DoIP, authenticated via HMAC)
- Boundary B:  FC-1 ↔ Bastion  (4G internet, SSH, mutual key auth)
- Boundary C:  DCU ↔ Bastion  (4G internet via FC-1 NAT, SSH, mutual key auth)
- Boundary D:  Operator ↔ Bastion  (HTTPS + SSH, operator credential auth)
- Boundary E:  Backend ↔ Bastion  (internal network, mTLS)
-```
+![Trust Boundaries](diagrams/trust_boundaries.png)
 
 **Critical invariant:** FC-1 is within the trust boundary for signaling (Boundary A and B) but is **never** in the cryptographic trust chain for DCU sessions (Boundary C). A compromised FC-1 can send a spurious phone-home trigger, but cannot read or intercept the DCU's SSH session.
 
@@ -419,6 +373,12 @@ timeout "$TUNNEL_TIMEOUT" ssh \
 ### 5.4 DCU: DoIP Phone-Home Service Handler
 
 This is the **new code** to be integrated into the existing DCU DoIP server. See Section 6 for full DoIP integration details.
+
+#### UDS RoutineControl Handler Flow
+
+The following flowchart shows the complete dispatch and validation logic for all three routine identifiers (0xF0A0 trigger, 0xF0A1 provisioning, 0xF0A2 status query):
+
+![UDS Handler Flowchart](diagrams/uds_handler.png)
 
 **Logical specification** (language-agnostic, adapt to your DoIP server's plugin/handler architecture):
 
@@ -998,52 +958,7 @@ exchanged over authenticated channels.
 
 ### 7.1 Zero-Touch Provisioning Sequence
 
-```
-FC-1 (First Boot)              DCU (DoIP Server)              Bastion Server
-       │                              │                              │
-       │ 1. Generate HMAC secret      │                              │
-       │    (32 bytes /dev/urandom)   │                              │
-       │    → saved to yaffs2 flash   │                              │
-       │                              │                              │
-       │ 2. Generate ED25519 SSH key  │                              │
-       │    → /usr/qk/etc/sv/FC-1/   │                              │
-       │      tunnel-key{,.pub}       │                              │
-       │                              │                              │
-       │ 3. Network comes online      │                              │
-       │    (WiFi or cellular)        │                              │
-       │                              │                              │
-       │ 4. Register SSH public key ──┼──────────────────────────────►│
-       │    POST /api/v1/devices/     │                              │
-       │    <serial>/pubkey           │  ◄───── tunnel_port assigned │
-       │    ◄─────────────────────────┼──────────────────────────────│
-       │    Save bastion host key     │                              │
-       │                              │                              │
-       │ 5. DoIP UDP broadcast ──────►│                              │
-       │    Vehicle ID Request        │                              │
-       │    (bound to eth0 IP)        │                              │
-       │    ◄──── Vehicle Announce ───│                              │
-       │                              │                              │
-       │ 6. DoIP TCP connect ────────►│                              │
-       │    Routing Activation        │                              │
-       │    ◄──── Routing Ack ────────│                              │
-       │                              │                              │
-       │ 7. Provision DCU ───────────►│                              │
-       │    UDS RoutineControl        │                              │
-       │    SID 0x31, RID 0xF0A1     │                              │
-       │    [CAN_SN + 32-byte HMAC]  │                              │
-       │    ◄──── Positive Resp 0x71 ─│                              │
-       │                              │  HMAC stored to flash        │
-       │                              │                              │
-       │ 8. Enable NAT/MASQUERADE    │                              │
-       │    (so DCU can reach        │                              │
-       │     bastion via FC-1)       │                              │
-       │                              │                              │
-       │ 9. Auto-connect persistent  │                              │
-       │    reverse SSH tunnel ──────┼──────────────────────────────►│
-       │    -R port:localhost:22222   │                              │
-       │                              │  Device shows ONLINE         │
-       │                              │                              │
-```
+![Provisioning Flow](diagrams/provisioning_flow.png)
 
 ### 7.2 Provisioning Details
 
@@ -1057,7 +972,13 @@ FC-1 (First Boot)              DCU (DoIP Server)              Bastion Server
 | NAT/MASQUERADE | FC-1 `connection_sharing.c` | After successful DCU provisioning | iptables rules + ip_forward | Per-boot (rules persist via iptables-save) |
 | Persistent tunnel | FC-1 `remote_access.c` | After bastion registration | Active SSH connection | Maintained with auto-reconnect |
 
-### 7.3 Re-Provisioning Behavior
+### 7.3 Provisioning State Machine
+
+The following state diagram shows how the DCU transitions between provisioning states and how the FC-1 health check (0xF0A2) drives automatic re-provisioning:
+
+![Health Check State Machine](diagrams/health_check.png)
+
+### 7.4 Re-Provisioning Behavior
 
 - **FC-1 reboot:** HMAC reloaded from flash. DCU re-provisioned on next DoIP connection. Tunnel re-established automatically.
 - **DCU reboot (only):** HMAC reloaded from DCU flash. No re-provisioning needed unless HMAC file was lost.
@@ -1081,27 +1002,7 @@ No manufacturing station, no manual configuration, no provisioning tokens.
 
 Step-by-step with timing expectations:
 
-```
-Time  Actor           Action
-──────────────────────────────────────────────────────────────────────
-T+0   Operator        Clicks "Connect to DCU-XXXXXXXX" in Web UI
-T+0   Web UI          POST /api/v1/phonehome/wake {"dcu_serial": "DCU-XXX"}
-T+0   Backend         Authenticates operator JWT, validates DCU serial
-T+0   Backend         Calls signal_dispatcher.dispatch_wake("DCU-XXX", operator_id)
-T+1s  Dispatcher      SSH command sent to FC-1 via existing reverse tunnel
-T+1s  FC-1            phonehome-relay.sh executes
-T+2s  FC-1            DoIP RoutineControl 0x31/0xF0A0 sent to DCU
-T+2s  DCU             DoIP handler validates HMAC and nonce
-T+2s  DCU             phonehome-connect.sh spawned as detached process
-T+2s  DCU             DoIP positive response (routineRunning) sent to FC-1
-T+3s  DCU             SSH reverse tunnel opens to Bastion
-T+3s  Bastion         Detects phonehome-DCU-XXX user connected; logs assigned port
-T+4s  Dispatcher      Detects tunnel port (e.g., 34521); returns to backend
-T+4s  Backend         Responds to Web UI: {"status":"ready","port":34521}
-T+4s  Web UI          Displays connection info to operator
-T+5s  Operator        ssh -p 34521 operator@bastion-dev.imatrixsys.com
-                       → Bastion forwards to DCU's SSH on port 22
-```
+![Phone-Home Operational Flow](diagrams/phonehome_flow.png)
 
 **Expected total latency:** 3–8 seconds from button click to operator prompt.
 

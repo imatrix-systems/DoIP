@@ -1,0 +1,30 @@
+stateDiagram-v2
+    [*] --> Unprovisioned: DCU Boot
+
+    Unprovisioned --> Provisioned: FC-1 sends 0xF0A1<br/>(HMAC + bastion + client key)
+
+    state Provisioned {
+        [*] --> Idle
+        Idle --> TunnelActive: Phone-home trigger<br/>0xF0A0 accepted
+        TunnelActive --> Idle: Tunnel closes<br/>(timeout/disconnect)
+    }
+
+    Provisioned --> Degraded: Health check 0xF0A2<br/>status != 0x00
+
+    state Degraded {
+        [*] --> MissingHMAC: status 0x01
+        [*] --> MissingKey: status 0x02
+        [*] --> MissingSSH: status 0x03
+    }
+
+    Degraded --> Provisioned: FC-1 re-provisions<br/>0xF0A1
+
+    Provisioned --> Unprovisioned: DCU restart<br/>(if HMAC not on disk)
+
+    note right of Unprovisioned
+        FC-1 health check runs
+        every 5 minutes.
+        Detects DCU restart via
+        uptime field in 0xF0A2
+        response.
+    end note
