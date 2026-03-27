@@ -1,7 +1,7 @@
 # DCU Phone-Home Capability — Developer Specification
 
-**Version:** 2.0.0
-**Status:** Implementation Complete (FC-1 + DCU provisioning validated 2026-03-17)
+**Version:** 3.0.0
+**Status:** Implementation Complete — End-to-end validated 2026-03-27 (FC-1 + DCU + Bastion web terminal)
 **Applies To:** FC-1 (BusyBox 4G Telematics Gateway), DCU (Diagnostic Control Unit, Ubuntu/BusyBox embedded), Bastion Server
 **Standards:** ISO 13400 (DoIP), ISO 21434, UNECE WP.29, RFC 4253 (SSH)
 
@@ -134,7 +134,7 @@ If the Bastion host key is rotated (planned key rotation), a firmware update mus
 
 The HMAC secret is a 32-byte random value provisioned at manufacture, identical on both FC-1 and the paired DCU. It authenticates DoIP phone-home trigger messages from FC-1 to DCU, ensuring a spoofed device on the local LAN cannot trigger a phone-home. The secret must be different for every FC-1/DCU pair.
 
-Provisioning method: embedded in the ECU configuration binary at EOL (End of Line) programming, or written to a protected NVM partition.
+Provisioning method: FC-1 auto-generates a 32-byte random HMAC secret on first boot (from /dev/urandom) and delivers it to the DCU via DoIP RoutineControl 0xF0A1 provisioning PDU. The secret is stored at /usr/qk/etc/sv/FC-1/hmac_secret (FC-1, yaffs2) and /etc/phonehome/hmac_secret (DCU). No manufacturing step is required.
 
 ---
 
@@ -499,7 +499,10 @@ After bastion registration, the FC-1 automatically establishes a persistent
 reverse SSH tunnel using `dbclient` (Dropbear SSH client):
 
 - Reverse port: `127.0.0.1:<tunnel_port>` → `127.0.0.1:22222` (FC-1 SSH)
-- Keepalive: 25 seconds
+- Keepalive: 10 seconds (aggressive for cellular NAT)
+- MTU: ppp0 set to 1400 on connect (prevents PMTU black hole on cellular)
+- tcp_mtu_probing: enabled on ppp0 connect (kernel PMTU discovery safety net)
+- Re-trigger: phone-home triggers while CONNECTED are ignored (prevents tunnel teardown during bastion web-ssh connect)
 - TTL: 3600 seconds (auto-rotated)
 - Host key: always TOFU (-y), stale known_hosts entries auto-cleared
 - On disconnect: auto-reconnect after 60-second cooldown
@@ -507,6 +510,21 @@ reverse SSH tunnel using `dbclient` (Dropbear SSH client):
 
 **Tunnel script:** `Fleet-Connect-1/remote_access/tunnel.sh` (embedded in binary,
 extracted to `/usr/qk/etc/sv/FC-1/scripts/tunnel.sh` at runtime)
+
+#### 5.5.5 Bastion Client Key Installation
+
+When the bastion registration response includes `bastion_client_pubkey`, the FC-1
+installs it in `/root/.ssh/authorized_keys` on both itself and the DCU (via
+provisioning PDU). This enables the bastion web-ssh app to authenticate through
+the reverse tunnel using key auth instead of password, which is critical because:
+
+- Dropbear has limited concurrent connection capacity
+- Key auth completes instantly vs password round-trip over cellular
+- Eliminates failed key auth attempts consuming Dropbear's `-T` limit
+
+**File:** `/root/.ssh/authorized_keys` (FC-1), `/home/imatrix/.ssh/authorized_keys` (DCU)
+**Permissions:** 0600
+**Compare-before-write:** avoids unnecessary flash writes on yaffs2
 
 ---
 
@@ -925,7 +943,7 @@ uds_response_t phonehome_routine_handler(const uint8_t *req, size_t req_len) {
 ```makefile
 # Add to your Makefile or CMakeLists.txt
 SRCS += phonehome_handler.c
-LDFLAGS += -lssl -lcrypto  # OpenSSL for HMAC
+# No external crypto dependency — uses standalone FIPS 180-4 SHA-256 + RFC 2104 HMAC (hmac_sha256.c)
 ```
 
 **Step 4: Call `phonehome_init()` during startup.**
@@ -1049,7 +1067,10 @@ Match User phonehome-*
     PermitTunnel no
     GatewayPorts no
     AuthorizedKeysFile /etc/phonehome/authorized_keys/%u
-    ForceCommand /bin/false
+    # ForceCommand must use sleep infinity, not /bin/false — /bin/false exits immediately causing sshd to tear down the session and its reverse port forwards after the grace period
+    ForceCommand /usr/bin/sleep infinity
+    ClientAliveInterval 15
+    ClientAliveCountMax 3
 
 # Separate match block for FC-1 relay users
 Match User relay-*
@@ -1058,6 +1079,8 @@ Match User relay-*
     PermitTTY no
     AuthorizedKeysFile /etc/phonehome/authorized_keys/%u
     ForceCommand /usr/sbin/phonehome-relay-gate.sh
+    ClientAliveInterval 15
+    ClientAliveCountMax 3
 ```
 
 ---
@@ -1375,7 +1398,7 @@ The DCU phone-home script requires SSH client features (`-R` for reverse tunnel,
 
 ### 12.3 OpenSSL / LibreSSL
 
-Required for HMAC-SHA256 in the C handler. Available on BusyBox systems via `libcrypto`. Alternative: use `hmac` from BusyBox's `libbb` if OpenSSL is not available, but verify the API matches.
+The DoIP server uses a standalone HMAC-SHA256 implementation (hmac_sha256.c) that implements FIPS 180-4 SHA-256 and RFC 2104 HMAC without any external dependency. No OpenSSL or LibreSSL is required.
 
 ### 12.4 Key Source Files to Create or Obtain
 
@@ -1404,7 +1427,7 @@ Before integrating, review these existing files and APIs in your DoIP server cod
 - [ ] Fork/process management policy — confirm the server design permits `fork()` from within a handler
 - [ ] Thread safety model — determine whether the replay cache mutex implementation is needed
 - [ ] Logging infrastructure — integrate with existing `syslog` or proprietary logging framework
-- [ ] Build system (Makefile/CMake) — add `phonehome_handler.c` and `-lssl -lcrypto` linker flags
+- [ ] Build system (Makefile/CMake) — add `phonehome_handler.c` and `hmac_sha256.c`
 - [ ] NRC constants — verify 0x35 and 0x24 are not reassigned in your UDS implementation
 
 ---
@@ -1416,8 +1439,10 @@ Before integrating, review these existing files and APIs in your DoIP server cod
 | DEC-01 | Key origin: FC-1 generates DCU keys vs DCU self-generates | **DCU self-generates. Private key never leaves DCU.** ISO 21434 compliance. | — |
 | DEC-02 | DoIP channel for key delivery | **Abandoned.** DoIP used only for phone-home trigger, not key delivery. | — |
 | DEC-03 | SSH algorithm selection | **ED25519 selected.** Compact, fast on embedded, 128-bit equivalent security. | — |
-| DEC-04 | Reverse tunnel port allocation | **Server auto-assign (port 0).** Dispatcher monitors sshd for assigned port. Implementation of tunnel-monitor daemon is outstanding. | OPEN |
+| DEC-04 | Reverse tunnel port allocation | **Closed.** Bastion assigns port during CoAP registration. tunnel_monitor.py sidecar checks listening ports via ss -tlnp. | 2026-03-27 |
 | DEC-05 | Replay cache size vs. nonce window | **64 entries, 300s TTL.** Appropriate for one trigger per session. Revisit if multi-trigger per minute use case arises. | — |
-| DEC-06 | Dropbear vs. OpenSSH on DCU | **TBD.** Depends on DCU firmware size budget. Dropbear is ~400KB; OpenSSH is ~2MB. Verify Dropbear reverse tunnel support in your build. | OPEN |
-| DEC-07 | Tunnel-monitor daemon implementation | Outstanding. Must detect assigned reverse tunnel port from sshd. Options: parse `/var/log/auth.log`, use `ss -tlnp`, or use `ControlSocket` SSH multiplexer. | OPEN |
-| DEC-08 | HMAC secret delivery to DCU at manufacture | **NVM / EOL programming.** Exact mechanism is manufacture-toolchain-specific. | OPEN |
+| DEC-06 | Dropbear vs. OpenSSH on DCU | **Closed.** Dropbear used on FC-1 (BusyBox). DCU uses OpenSSH ssh-keygen for key generation + Dropbear dbclient for tunnel. Reverse tunnel confirmed working. | 2026-03-27 |
+| DEC-07 | Tunnel-monitor daemon implementation | **Closed.** tunnel_monitor.py sidecar (Docker container) polls ss -tlnp every 15s and updates Redis with port→device mapping. | 2026-03-27 |
+| DEC-08 | HMAC secret delivery to DCU at manufacture | **Closed.** FC-1 auto-generates HMAC secret on first boot and provisions DCU via DoIP RoutineControl 0xF0A1. No manufacturing step required. | 2026-03-27 |
+| DEC-09 | Cellular PMTU black hole | **Resolved.** ppp0 MTU set to 1400 + tcp_mtu_probing=1 on cellular connect. Carriers silently drop packets > real path MTU. | 2026-03-27 |
+| DEC-10 | ForceCommand for tunnel user | **Resolved.** Must use sleep infinity, not /bin/false. /bin/false exits immediately, causing sshd to close the session and drop reverse port forwards. | 2026-03-27 |

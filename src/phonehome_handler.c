@@ -937,14 +937,33 @@ int phonehome_ensure_ssh_user(const phonehome_config_t *cfg)
         LOG_INFO("phonehome: SSH user '%s' already exists", user);
     }
 
-    /* Ensure .ssh directory exists with correct permissions */
+    /* Ensure .ssh directory exists with correct permissions.
+     * Use sudo if not running as root — the server may run as a
+     * non-root user (e.g. development deployment) but needs to
+     * write to another user's home directory. */
+    bool use_sudo = (getuid() != 0);
+
     if (stat(ssh_dir, &st) != 0) {
-        if (mkdir(ssh_dir, 0700) != 0) {
-            LOG_ERROR("phonehome: cannot create %s: %s", ssh_dir, strerror(errno));
-            return -1;
+        if (use_sudo) {
+            char cmd[256];
+            snprintf(cmd, sizeof(cmd),
+                     "sudo mkdir -p '%s' && sudo chmod 700 '%s'",
+                     ssh_dir, ssh_dir);
+            int rc = system(cmd);
+            if (rc != 0) {
+                LOG_ERROR("phonehome: cannot create %s (sudo rc=%d)", ssh_dir, rc);
+                return -1;
+            }
+        } else {
+            if (mkdir(ssh_dir, 0700) != 0) {
+                LOG_ERROR("phonehome: cannot create %s: %s", ssh_dir, strerror(errno));
+                return -1;
+            }
         }
     }
-    chmod(ssh_dir, 0700);
+    if (!use_sudo) {
+        chmod(ssh_dir, 0700);
+    }
 
     /* Get user's uid/gid for chown */
     char id_cmd[256];
@@ -959,7 +978,14 @@ int phonehome_ensure_ssh_user(const phonehome_config_t *cfg)
     if (fp) { int r_ = fscanf(fp, "%d", &gid); (void)r_; pclose(fp); }
 
     if (uid >= 0 && gid >= 0) {
-        int r_ = chown(ssh_dir, (uid_t)uid, (gid_t)gid); (void)r_;
+        if (use_sudo) {
+            char cmd[256];
+            snprintf(cmd, sizeof(cmd),
+                     "sudo chown %d:%d '%s'", uid, gid, ssh_dir);
+            int r_ = system(cmd); (void)r_;
+        } else {
+            int r_ = chown(ssh_dir, (uid_t)uid, (gid_t)gid); (void)r_;
+        }
     }
 
     /* Install bastion client key in authorized_keys if configured */
@@ -979,18 +1005,39 @@ int phonehome_ensure_ssh_user(const phonehome_config_t *cfg)
         }
 
         if (!key_present) {
-            FILE *ak = fopen(auth_keys_path, "a");
-            if (ak) {
-                fprintf(ak, "%s\n", cfg->bastion_client_key);
-                fclose(ak);
-                chmod(auth_keys_path, 0600);
+            if (use_sudo) {
+                /* Write via sudo tee — server doesn't own the target directory */
+                char cmd[512];
+                snprintf(cmd, sizeof(cmd),
+                         "echo '%s' | sudo tee -a '%s' > /dev/null "
+                         "&& sudo chmod 600 '%s'",
+                         cfg->bastion_client_key, auth_keys_path, auth_keys_path);
                 if (uid >= 0 && gid >= 0) {
-                    int r_ = chown(auth_keys_path, (uid_t)uid, (gid_t)gid); (void)r_;
+                    char chown_cmd[128];
+                    snprintf(chown_cmd, sizeof(chown_cmd),
+                             " && sudo chown %d:%d '%s'", uid, gid, auth_keys_path);
+                    strncat(cmd, chown_cmd, sizeof(cmd) - strlen(cmd) - 1);
                 }
-                LOG_INFO("phonehome: installed bastion client key in %s", auth_keys_path);
+                int rc = system(cmd);
+                if (rc != 0) {
+                    LOG_ERROR("phonehome: cannot write %s (sudo rc=%d)", auth_keys_path, rc);
+                    return -1;
+                }
+                LOG_INFO("phonehome: installed bastion client key in %s (via sudo)", auth_keys_path);
             } else {
-                LOG_ERROR("phonehome: cannot write %s: %s", auth_keys_path, strerror(errno));
-                return -1;
+                FILE *ak = fopen(auth_keys_path, "a");
+                if (ak) {
+                    fprintf(ak, "%s\n", cfg->bastion_client_key);
+                    fclose(ak);
+                    chmod(auth_keys_path, 0600);
+                    if (uid >= 0 && gid >= 0) {
+                        int r_ = chown(auth_keys_path, (uid_t)uid, (gid_t)gid); (void)r_;
+                    }
+                    LOG_INFO("phonehome: installed bastion client key in %s", auth_keys_path);
+                } else {
+                    LOG_ERROR("phonehome: cannot write %s: %s", auth_keys_path, strerror(errno));
+                    return -1;
+                }
             }
         } else {
             LOG_INFO("phonehome: bastion client key already in %s", auth_keys_path);

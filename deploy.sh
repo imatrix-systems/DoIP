@@ -38,13 +38,18 @@ HOST="${USER}@${HOST_IP}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# --- Password file (avoids quoting issues with special chars) ---
+PASS_FILE=$(mktemp)
+echo -n "$PASS" > "$PASS_FILE"
+trap 'rm -f "$PASS_FILE"' EXIT
+
 # --- Helpers ---
 do_ssh() {
-    sshpass -p "$PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$HOST" "$@"
+    sshpass -f "$PASS_FILE" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o PubkeyAuthentication=no "$HOST" "$@"
 }
 
 do_scp() {
-    sshpass -p "$PASS" scp -o StrictHostKeyChecking=no "$@"
+    sshpass -f "$PASS_FILE" scp -o StrictHostKeyChecking=no -o PubkeyAuthentication=no "$@"
 }
 
 # --- Preflight checks ---
@@ -77,7 +82,7 @@ echo "OK"
 
 # --- Stop existing server if running ---
 echo -n "Stopping existing server... "
-do_ssh "pkill -f '${DEST}/bin/doip-server' 2>/dev/null; sleep 1" || true
+do_ssh "sudo pkill -f '${DEST}/bin/doip-server' 2>/dev/null; sleep 1" || true
 echo "done"
 
 # --- Create directory structure ---
@@ -123,7 +128,7 @@ echo -n "Creating run.sh... "
 do_ssh "cat > ${DEST}/run.sh << 'RUNEOF'
 #!/bin/bash
 DOIP_DIR=\"\$(cd \"\$(dirname \"\$0\")\" && pwd)\"
-exec \${DOIP_DIR}/bin/doip-server -c \${DOIP_DIR}/etc/doip-server.conf -l \${DOIP_DIR}/log/server.log \"\$@\"
+exec sudo \${DOIP_DIR}/bin/doip-server -c \${DOIP_DIR}/etc/doip-server.conf -l \${DOIP_DIR}/log/server.log \"\$@\"
 RUNEOF
 chmod +x ${DEST}/run.sh"
 echo "done"
@@ -135,7 +140,7 @@ do_ssh "cat > ${DEST}/stop.sh << 'STOPEOF'
 DOIP_DIR=\"\$(cd \"\$(dirname \"\$0\")\" && pwd)\"
 PID=\$(pgrep -f \"\${DOIP_DIR}/bin/doip-server\")
 if [ -n \"\$PID\" ]; then
-    kill \$PID
+    sudo kill \$PID
     echo \"DoIP server stopped (PID \$PID)\"
 else
     echo \"DoIP server not running\"
@@ -147,7 +152,7 @@ echo "done"
 # --- Start server ---
 echo ""
 echo "=== Starting server ==="
-do_ssh "nohup ${DEST}/run.sh > /dev/null 2>&1 &
+do_ssh "nohup sudo ${DEST}/run.sh > /dev/null 2>&1 &
 sleep 2
 PID=\$(pgrep -f '${DEST}/bin/doip-server')
 if [ -n \"\$PID\" ]; then

@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"name": "imatrix-bastion",
+			"path": "../../imatrix-bastion"
+		}
+	],
+	"settings": {}
+}
