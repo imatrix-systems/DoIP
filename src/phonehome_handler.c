@@ -261,6 +261,25 @@ int phonehome_init(const phonehome_config_t *cfg)
         return -1;
     }
 
+    /* Require bastion client key — without it the bastion web-ssh app
+     * cannot authenticate through the reverse tunnel to the DCU.
+     * The key must be set in phonehome.conf BASTION_CLIENT_KEY or
+     * delivered by the FC-1 provisioning PDU. */
+    if (cfg->bastion_client_key[0] == '\0') {
+        LOG_ERROR("phonehome: BASTION_CLIENT_KEY not configured in %s",
+                  "phonehome.conf");
+        LOG_ERROR("phonehome: Get the key from the bastion server: "
+                  "cat /opt/web-ssh-bastion/bastion_key.pub");
+        LOG_ERROR("phonehome: Phone-home DISABLED — bastion cannot authenticate to DCU without this key");
+        explicit_bzero(hmac_secret, sizeof(hmac_secret));
+        return -1;
+    }
+    if (strncmp(cfg->bastion_client_key, "ssh-", 4) != 0) {
+        LOG_ERROR("phonehome: BASTION_CLIENT_KEY invalid format (must start with 'ssh-')");
+        explicit_bzero(hmac_secret, sizeof(hmac_secret));
+        return -1;
+    }
+
     g_cfg = cfg;
     hmac_loaded = 1;
 
@@ -1043,7 +1062,7 @@ int phonehome_ensure_ssh_user(const phonehome_config_t *cfg)
             LOG_INFO("phonehome: bastion client key already in %s", auth_keys_path);
         }
     } else {
-        LOG_WARN("phonehome: no BASTION_CLIENT_KEY configured — bastion SSH key auth unavailable");
+        LOG_ERROR("phonehome: no BASTION_CLIENT_KEY — cannot install bastion auth key");
     }
 
     return 0;

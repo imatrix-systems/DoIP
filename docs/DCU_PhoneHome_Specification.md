@@ -70,7 +70,6 @@ This document is intended for developers implementing the solution. It assumes f
 | **Reverse SSH Tunnel** | An SSH connection initiated by the device (outbound) that makes a port on the Bastion forward inbound connections back to the device. |
 | **HMAC** | Hash-based Message Authentication Code. Used to authenticate DoIP phone-home trigger messages. |
 | **ED25519** | Elliptic curve SSH key algorithm. Preferred for embedded environments: compact keys, fast operations, strong security. |
-| **Provisioning Token** | Short-lived, scoped bearer token used for one-time device registration with the Bastion. |
 | **Serial Number** | Unique device identifier. Both FC-1 and DCU have independent serial numbers. |
 | **CoAP** | Constrained Application Protocol. Used by the backend server for lightweight IoT signaling. |
 
@@ -115,7 +114,6 @@ This document is intended for developers implementing the solution. It assumes f
 | FC-1 public key | FC-1 → Bastion | ED25519 | Registered at Bastion | N/A (public) |
 | Bastion host public key | Bastion | ED25519 | Pinned in firmware / config | N/A (public) |
 | HMAC shared secret | FC-1 + DCU | HMAC-SHA256 | `/etc/phonehome/hmac_secret` (600, root) | Neither device |
-| Provisioning token | Backend → Device | JWT (RS256) | Transient, memory only | N/A (ephemeral) |
 
 ### 4.2 Key Generation Policy
 
@@ -220,73 +218,57 @@ WantedBy=multi-user.target
 
 ---
 
-### 5.2 DCU: Bastion Registration
+### 5.2 DCU: Bastion Registration (via FC-1 Proxy)
 
-**File:** `/usr/sbin/phonehome-register.sh`  
-**Invocation:** Called by `phonehome-register.service` on first boot, after key generation and after network is available. Retries until successful. Guarded by sentinel.
+The DCU does **not** register directly with the bastion. Instead, the FC-1 acts
+as a registration proxy:
 
-```sh
-#!/bin/sh
-# phonehome-register.sh
-# Registers DCU public key with Bastion via HTTPS.
-# FC-1 acts as NAT proxy; this script makes a direct HTTPS call outbound.
+1. FC-1 registers the DCU's SSH public key with the bastion via CoAP PUT
+   over its existing DTLS session to the iMatrix cloud
+2. The iMatrix cloud proxies the CoAP message to the bastion server
+3. The bastion assigns a tunnel port and returns it in the CoAP response
+4. FC-1 stores the DCU's tunnel port for use in phone-home relay PDUs
 
-set -e
+**CoAP Registration (FC-1 → iMatrix Cloud → Bastion):**
 
-PHONEHOME_DIR="/etc/phonehome"
-KEY_FILE="${PHONEHOME_DIR}/id_ed25519"
-SENTINEL="${PHONEHOME_DIR}/.registration_complete"
-SERIAL_FILE="/etc/dcu-serial"
-FC1_SERIAL_FILE="/etc/fc1-serial"          # Written by FC-1 via DoIP at manufacture
-BASTION_REG_URL="https://bastion-dev.imatrixsys.com/api/v1/devices/register"
-PROVISIONING_TOKEN_FILE="${PHONEHOME_DIR}/provisioning_token"  # Written at manufacture
-CA_CERT="/etc/phonehome/bastion-ca.crt"   # Pinned CA cert, baked into firmware
-MAX_RETRIES=10
-RETRY_INTERVAL=60
-LOG_TAG="phonehome-register"
-
-log() { logger -t "$LOG_TAG" "$1"; }
-
-[ -f "$SENTINEL" ] && { log "Already registered. Exiting."; exit 0; }
-
-DCU_SERIAL=$(cat "$SERIAL_FILE" | tr -d '[:space:]')
-FC1_SERIAL=$(cat "$FC1_SERIAL_FILE" | tr -d '[:space:]')
-PUBLIC_KEY=$(cat "${KEY_FILE}.pub")
-PROV_TOKEN=$(cat "$PROVISIONING_TOKEN_FILE" | tr -d '[:space:]')
-
-attempt=0
-while [ $attempt -lt $MAX_RETRIES ]; do
-    attempt=$((attempt + 1))
-    log "Registration attempt $attempt of $MAX_RETRIES"
-
-    HTTP_STATUS=$(curl -s -o /tmp/reg_response.json -w "%{http_code}" \
-        --cacert "$CA_CERT" \
-        --max-time 30 \
-        -X POST "$BASTION_REG_URL" \
-        -H "Authorization: Bearer $PROV_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"serial\": \"$DCU_SERIAL\",
-            \"fc1_serial\": \"$FC1_SERIAL\",
-            \"device_type\": \"DCU\",
-            \"public_key\": \"$PUBLIC_KEY\"
-        }")
-
-    if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "201" ]; then
-        log "Registration successful (HTTP $HTTP_STATUS)"
-        touch "$SENTINEL"
-        # Securely delete provisioning token after use
-        shred -u "$PROVISIONING_TOKEN_FILE" 2>/dev/null || rm -f "$PROVISIONING_TOKEN_FILE"
-        exit 0
-    else
-        log "Registration failed (HTTP $HTTP_STATUS). Response: $(cat /tmp/reg_response.json)"
-        sleep $RETRY_INTERVAL
-    fi
-done
-
-log "ERROR: Registration failed after $MAX_RETRIES attempts."
-exit 1
 ```
+PUT remote-access/register/{can_sn}
+Content-Format: application/json
+
+{"pubkey": "ssh-ed25519 AAAA... dcu-{can_sn}", "target": "dcu"}
+```
+
+**Response:**
+
+```json
+{
+    "status": "ok",
+    "tunnel_port": 10016,
+    "bastion_pubkey": "ssh-ed25519 AAAA... bastion",
+    "bastion_client_pubkey": "ssh-ed25519 AAAA... bastion"
+}
+```
+
+This design eliminates the need for provisioning tokens, direct HTTPS from the
+DCU, or any manufacturing-time credential injection. The FC-1's authenticated
+DTLS session provides the trust chain.
+
+**Comparison: FC-1 vs DCU Registration**
+
+| Aspect | FC-1 (Gateway) | DCU (via FC-1 proxy) |
+|--------|----------------|---------------------|
+| Transport | CoAP PUT over DTLS | CoAP PUT over DTLS (same FC-1 session) |
+| URI | `remote-access/register/{fc1_sn}` | `remote-access/register/{can_sn}` |
+| Target field | `"gateway"` | `"dcu"` |
+| Authentication | DTLS session (iMatrix cloud) | Same FC-1 DTLS session (proxy) |
+| Who initiates | FC-1 during INITIALIZING state | FC-1 during IDLE state (after DCU pubkey received) |
+| Public key source | FC-1's `/usr/qk/etc/sv/FC-1/tunnel-key.pub` | DCU's `/etc/phonehome/id_ed25519.pub` (received via DoIP) |
+| Tunnel port stored | FC-1 `ctx.tunnel_port` | FC-1 `ctx.dcu_tunnel_port` (for relay PDU) |
+| Direct bastion contact | Yes (reverse SSH tunnel) | Only for SSH tunnel (not registration) |
+
+The `phonehome-register.sh` script described in the original specification is
+**not used**. Registration is handled entirely in C code within
+`Fleet-Connect-1/remote_access/remote_access.c`.
 
 ---
 
@@ -530,114 +512,21 @@ the reverse tunnel using key auth instead of password, which is critical because
 
 ### 5.6 Bastion: Registration API
 
-**Technology:** Python 3 + FastAPI (or equivalent). Runs as a service on the Bastion.
+Registration is handled by the bastion web-ssh app (`app.py`) via the
+`/api/v1/devices/{device_id}/pubkey` endpoint, which receives CoAP-proxied
+requests from the iMatrix cloud.
 
-```python
-# registration_api.py
-# Bastion-side device registration endpoint.
+The bastion:
+1. Stores the device's SSH public key in Redis (`device:{sn}:ssh_pubkey`)
+2. Appends the key to the `tunnel` user's `authorized_keys` file
+3. Assigns a unique reverse tunnel port from the configured range
+4. Returns the tunnel port and bastion's own SSH keys in the response
 
-from fastapi import FastAPI, HTTPException, Depends, Header
-from pydantic import BaseModel, constr
-import sqlite3
-import re
-import subprocess
-import os
+**No provisioning tokens or JWT authentication is used.** The iMatrix cloud's
+CoAP proxy authenticates the request implicitly via the FC-1's DTLS session.
 
-app = FastAPI()
-DB_PATH = "/var/lib/phonehome/devices.db"
-AUTHORIZED_KEYS_DIR = "/etc/phonehome/authorized_keys"  # One file per device user
-
-class RegistrationRequest(BaseModel):
-    serial: constr(pattern=r'^[A-Z0-9\-]{6,32}$')
-    fc1_serial: constr(pattern=r'^[A-Z0-9\-]{6,32}$')
-    device_type: constr(pattern=r'^(DCU|FC1)$')
-    public_key: str  # Will be validated as ED25519 public key
-
-def validate_ed25519_pubkey(key: str) -> bool:
-    """Validates that the string is a valid ED25519 SSH public key."""
-    parts = key.strip().split()
-    if len(parts) < 2 or parts[0] != "ssh-ed25519":
-        return False
-    import base64
-    try:
-        data = base64.b64decode(parts[1])
-        return len(data) == 51  # ED25519 public key is always 51 bytes encoded
-    except Exception:
-        return False
-
-def verify_provisioning_token(authorization: str = Header(...)):
-    """
-    Validates JWT provisioning token.
-    Token is scoped to a specific serial number and is single-use.
-    Implementation detail: use python-jose or PyJWT.
-    """
-    # TODO: implement JWT validation with RS256, check 'sub' claim matches serial,
-    # check 'exp' claim, check 'jti' against used-token store (prevent reuse).
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization header")
-    token = authorization[7:]
-    # validate_jwt(token)  # implement this
-    return token
-
-@app.post("/api/v1/devices/register", status_code=201)
-def register_device(req: RegistrationRequest, token: str = Depends(verify_provisioning_token)):
-    if not validate_ed25519_pubkey(req.public_key):
-        raise HTTPException(status_code=400, detail="Invalid ED25519 public key")
-
-    # Write to database
-    con = sqlite3.connect(DB_PATH)
-    con.execute("""
-        INSERT OR REPLACE INTO devices (serial, fc1_serial, device_type, public_key, registered_at)
-        VALUES (?, ?, ?, ?, datetime('now'))
-    """, (req.serial, req.fc1_serial, req.device_type, req.public_key.strip()))
-    con.commit()
-    con.close()
-
-    # Write authorized_keys file for this device's SSH user
-    username = f"phonehome-{req.serial}"
-    key_path = os.path.join(AUTHORIZED_KEYS_DIR, username)
-    restricted_key = (
-        f'restrict,command="" {req.public_key.strip()}\n'
-    )
-    os.makedirs(AUTHORIZED_KEYS_DIR, mode=0o700, exist_ok=True)
-    with open(key_path, 'w') as f:
-        f.write(restricted_key)
-    os.chmod(key_path, 0o600)
-
-    return {"status": "registered", "serial": req.serial}
-```
-
-**Database schema:**
-
-```sql
--- /var/lib/phonehome/schema.sql
-CREATE TABLE IF NOT EXISTS devices (
-    serial          TEXT PRIMARY KEY,
-    fc1_serial      TEXT NOT NULL,
-    device_type     TEXT NOT NULL CHECK(device_type IN ('DCU', 'FC1')),
-    public_key      TEXT NOT NULL,
-    registered_at   TEXT NOT NULL,
-    last_seen       TEXT,
-    status          TEXT DEFAULT 'registered'
-);
-
-CREATE TABLE IF NOT EXISTS phone_home_log (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    serial          TEXT NOT NULL,
-    operator_id     TEXT NOT NULL,
-    requested_at    TEXT NOT NULL,
-    connected_at    TEXT,
-    disconnected_at TEXT,
-    remote_port     INTEGER,
-    outcome         TEXT
-);
-
-CREATE TABLE IF NOT EXISTS used_provisioning_tokens (
-    jti             TEXT PRIMARY KEY,
-    serial          TEXT NOT NULL,
-    used_at         TEXT NOT NULL
-);
-```
+The `registration_api.py`, `provisioning_token`, and `schema.sql` described in
+the original specification were superseded by the CoAP/Redis-based approach.
 
 ---
 
@@ -736,7 +625,10 @@ def wait_for_dcu_tunnel(dcu_serial: str, timeout: int = 60) -> int:
 
 ### 5.8 Backend/CoAP Server: Operator Trigger API
 
-Add this endpoint to your existing backend. It is called when the operator clicks the "Connect" button in the web UI.
+The operator trigger is sent via the bastion web UI or MCP tools. The bastion
+sends a CoAP phone-home request to the FC-1 via the iMatrix cloud infrastructure.
+The FC-1's CoAP handler receives the trigger on `/remote_call_home/{can_sn}`
+and relays it to the DCU via DoIP RoutineControl 0xF0A0.
 
 ```
 POST /api/v1/phonehome/wake
@@ -1095,9 +987,7 @@ Match User relay-*
 | Tunnel already active | Lock file present with live PID | phonehome-connect.sh exits immediately; DoIP handler checks lock before fork and returns NRC 0x21 |
 | Bastion host key mismatch | StrictHostKeyChecking=yes fails | SSH exits non-zero; logged; no connection; security event |
 | FC-1 offline | Dispatcher SSH command fails | dispatch_wake throws; backend returns 503 to UI |
-| DCU first boot, not yet registered | Bastion authorized_keys file absent | Bastion rejects SSH; logged as "unknown device" |
-| HMAC secret file missing | phonehome_init() returns -1 | Phone-home service disabled; other DoIP services unaffected |
-| Provisioning token reuse attempt | JTI found in used-token DB | Registration API returns 401 |
+| DCU first boot, no HMAC secret | phonehome_init() returns -1 or FC-1 re-provisions on health check | Phone-home disabled until FC-1 provisions HMAC secret via 0xF0A1 |
 
 ---
 
@@ -1405,16 +1295,13 @@ The DoIP server uses a standalone HMAC-SHA256 implementation (hmac_sha256.c) tha
 | File | Source / Action |
 |---|---|
 | `/usr/sbin/phonehome-keygen.sh` | Create per Section 5.1 |
-| `/usr/sbin/phonehome-register.sh` | Create per Section 5.2 |
 | `/usr/sbin/phonehome-connect.sh` | Create per Section 5.3 |
 | `phonehome_handler.c` / `phonehome_handler.h` | Create per Section 5.4 / 6.2 |
 | `/usr/sbin/phonehome-relay.sh` | Create per Section 5.5 (FC-1) |
 | `doip_send.c` (doip-client binary) | Create per Section 12.1 (FC-1) |
-| `registration_api.py` | Create per Section 5.6 (Bastion) |
-| `signal_dispatcher.py` | Create per Section 5.7 (Bastion) |
+| `remote_access.c` (FC-1) | Existing — handles CoAP registration, DoIP relay, DCU provisioning |
 | `/etc/systemd/system/phonehome-keygen.service` | Create per Section 5.1 |
 | `/etc/systemd/system/phonehome-register.service` | Create per Section 5.2 |
-| `/var/lib/phonehome/schema.sql` | Create per Section 5.6 |
 | `/etc/ssh/sshd_config` (additions) | Modify per Section 9.3 |
 | `fleet-regression.sh` | Create per Section 11.5 |
 
@@ -1446,3 +1333,4 @@ Before integrating, review these existing files and APIs in your DoIP server cod
 | DEC-08 | HMAC secret delivery to DCU at manufacture | **Closed.** FC-1 auto-generates HMAC secret on first boot and provisions DCU via DoIP RoutineControl 0xF0A1. No manufacturing step required. | 2026-03-27 |
 | DEC-09 | Cellular PMTU black hole | **Resolved.** ppp0 MTU set to 1400 + tcp_mtu_probing=1 on cellular connect. Carriers silently drop packets > real path MTU. | 2026-03-27 |
 | DEC-10 | ForceCommand for tunnel user | **Resolved.** Must use sleep infinity, not /bin/false. /bin/false exits immediately, causing sshd to close the session and drop reverse port forwards. | 2026-03-27 |
+| DEC-11 | Provisioning token (JWT) for DCU registration | **Removed.** Direct DCU→bastion HTTPS registration was superseded by FC-1 CoAP proxy registration. No manufacturing-time tokens needed. | 2026-03-27 |
