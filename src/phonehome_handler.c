@@ -47,6 +47,26 @@ static void secure_zero(void *buf, size_t len)
 #define explicit_bzero(buf, len) secure_zero(buf, len)
 #endif
 
+/**
+ * @brief Log a hex dump of a buffer for protocol debugging
+ *
+ * Outputs data in format: "  [offset] XX XX XX XX ... | ascii..."
+ * Useful for inspecting UDS PDUs during development.
+ */
+static void log_hex_dump(const char *label, const uint8_t *data, size_t len)
+{
+    LOG_INFO("phonehome: --- %s (%zu bytes) ---", label, len);
+    for (size_t i = 0; i < len; i += 16) {
+        char hex[49] = {0};
+        char ascii[17] = {0};
+        for (size_t j = 0; j < 16 && (i + j) < len; j++) {
+            sprintf(hex + j * 3, "%02X ", data[i + j]);
+            ascii[j] = (data[i + j] >= 0x20 && data[i + j] < 0x7F) ? (char)data[i + j] : '.';
+        }
+        LOG_INFO("phonehome:   [%04zX] %-48s | %s", i, hex, ascii);
+    }
+}
+
 /* ============================================================================
  * Constants
  * ========================================================================== */
@@ -417,6 +437,11 @@ int phonehome_handle_routine(const uint8_t *uds_data, uint32_t uds_len,
     const uint8_t *nonce = uds_data + NONCE_OFFSET;
     const uint8_t *rx_hmac = uds_data + HMAC_OFFSET;
 
+    log_hex_dump("Trigger PDU (0xF0A0)", uds_data, uds_len);
+    LOG_INFO("phonehome: [STEP 1] Nonce extracted: %02x%02x%02x%02x%02x%02x%02x%02x",
+             nonce[0], nonce[1], nonce[2], nonce[3],
+             nonce[4], nonce[5], nonce[6], nonce[7]);
+
     /*
      * Compute expected HMAC using local copy of secret.
      * Legacy PDU (44 bytes): HMAC(secret, nonce)
@@ -449,17 +474,23 @@ int phonehome_handle_routine(const uint8_t *uds_data, uint32_t uds_len,
     /* Clear secret copy — no longer needed after HMAC computation */
     explicit_bzero(local_secret, sizeof(local_secret));
 
+    LOG_INFO("phonehome: [STEP 2] HMAC computed — comparing %zu bytes", (size_t)HMAC_LEN);
+
     /* Constant-time comparison */
     if (hmac_sha256_compare(rx_hmac, exp_hmac, HMAC_LEN) != 0) {
         LOG_WARN("phonehome: HMAC verification failed — possible spoofing attempt");
         return build_nrc(NRC_INVALID_KEY, response, resp_size);
     }
 
+    LOG_INFO("phonehome: [STEP 3] HMAC verification PASSED");
+
     /* Replay protection */
     if (check_and_record_nonce(nonce) != 0) {
         LOG_WARN("phonehome: replayed nonce detected");
         return build_nrc(NRC_REQUEST_SEQUENCE_ERROR, response, resp_size);
     }
+
+    LOG_INFO("phonehome: [STEP 4] Replay check PASSED (nonce is fresh)");
 
     /* Parse optional args: bastion_host (null-terminated) + port (uint16 BE) */
     char bastion_host[254];
@@ -486,6 +517,8 @@ int phonehome_handle_routine(const uint8_t *uds_data, uint32_t uds_len,
             }
         }
     }
+
+    LOG_INFO("phonehome: [STEP 5] Bastion target: %s:%u", bastion_host, remote_port);
 
     /* Format nonce as hex string for script argument */
     char nonce_hex[NONCE_LEN * 2 + 1];
@@ -527,6 +560,8 @@ int phonehome_handle_routine(const uint8_t *uds_data, uint32_t uds_len,
         return build_nrc(NRC_CONDITIONS_NOT_CORRECT, response, resp_size);
     }
 
+    LOG_INFO("phonehome: [STEP 6] Spawning tunnel: %s %s %s %s",
+             cfg->connect_script, bastion_host, port_str, nonce_hex);
     LOG_INFO("phonehome: trigger accepted. Bastion=%s Port=%s Nonce=%s",
              bastion_host, port_str, nonce_hex);
 
@@ -578,6 +613,7 @@ int phonehome_handle_routine(const uint8_t *uds_data, uint32_t uds_len,
     response[2] = 0xF0;    /* routineIdentifier high byte */
     response[3] = 0xA0;    /* routineIdentifier low byte */
     response[4] = 0x02;    /* routineStatus: routineRunning */
+    LOG_INFO("phonehome: [STEP 7] Positive response sent: 0x71 0x01 0xF0 0xA0 0x02 (routineRunning)");
     return 5;
 }
 
@@ -611,6 +647,8 @@ int phonehome_handle_routine(const uint8_t *uds_data, uint32_t uds_len,
 int phonehome_handle_provision(const uint8_t *uds_data, uint32_t uds_len,
                                 uint8_t *response, uint32_t resp_size)
 {
+    log_hex_dump("Provision PDU (0xF0A1)", uds_data, uds_len);
+
     /* Validate minimum PDU length */
     if (uds_len < PROVISION_PDU_MIN) {
         LOG_WARN("phonehome: provision rejected — bad PDU length (%u, need >= %d)",
@@ -623,6 +661,7 @@ int phonehome_handle_provision(const uint8_t *uds_data, uint32_t uds_len,
                       ((uint32_t)uds_data[5] << 16) |
                       ((uint32_t)uds_data[6] <<  8) |
                       ((uint32_t)uds_data[7]);
+    LOG_INFO("phonehome: [PROV STEP 1] CAN SN: %u (0x%08X)", can_sn, can_sn);
     if (can_sn == 0) {
         LOG_WARN("phonehome: provision rejected — CAN SN is zero");
         return build_nrc(NRC_REQUEST_OUT_OF_RANGE, response, resp_size);
@@ -674,6 +713,8 @@ int phonehome_handle_provision(const uint8_t *uds_data, uint32_t uds_len,
         return build_nrc(NRC_GENERAL_PROGRAMMING_FAILURE, response, resp_size);
     }
 
+    LOG_INFO("phonehome: [PROV STEP 2] HMAC secret written to %s (32 bytes, atomic)", HMAC_SECRET_PATH);
+
     /*
      * Load HMAC secret into memory under lock.
      * Set g_cfg BEFORE hmac_loaded to avoid a race window where
@@ -710,6 +751,8 @@ int phonehome_handle_provision(const uint8_t *uds_data, uint32_t uds_len,
             g_provision_cfg.bastion_port = bastion_port;
             LOG_INFO("phonehome: bastion=%s:%u (from FC-1 provision)",
                      g_provision_cfg.bastion_host, bastion_port);
+            LOG_INFO("phonehome: [PROV STEP 3] Bastion: %s:%u",
+                     g_provision_cfg.bastion_host, g_provision_cfg.bastion_port);
         }
 
         /* Check for bastion client pubkey after the hostname null terminator */
@@ -722,6 +765,8 @@ int phonehome_handle_provision(const uint8_t *uds_data, uint32_t uds_len,
                 strncpy(g_provision_cfg.bastion_client_key, client_key,
                         sizeof(g_provision_cfg.bastion_client_key) - 1);
                 LOG_INFO("phonehome: bastion client key received (%zu bytes)", key_len);
+                LOG_INFO("phonehome: [PROV STEP 4] Bastion client key: %.40s...",
+                         g_provision_cfg.bastion_client_key);
             }
         }
     } else {
@@ -752,6 +797,7 @@ int phonehome_handle_provision(const uint8_t *uds_data, uint32_t uds_len,
         phonehome_config_t root_cfg = g_provision_cfg;
         strncpy(root_cfg.ssh_user, "root", sizeof(root_cfg.ssh_user) - 1);
         phonehome_ensure_ssh_user(&root_cfg);
+        LOG_INFO("phonehome: [PROV STEP 5] SSH user setup complete (imatrix + root)");
     }
 
     /*
@@ -814,6 +860,10 @@ int phonehome_handle_provision(const uint8_t *uds_data, uint32_t uds_len,
          * Format: 71 01 F0 A1 00 <pubkey_string_null_terminated>
          * The FC-1 extracts the pubkey and registers it with the bastion.
          */
+        if (pubkey_len > 0) {
+            LOG_INFO("phonehome: [PROV STEP 6] Returning DCU pubkey (%zu bytes) in response",
+                     pubkey_len);
+        }
         size_t resp_len = 5 + pubkey_len + (pubkey_len > 0 ? 1 : 0); /* +1 for null */
         if (resp_size < resp_len) return -1;
 
@@ -831,6 +881,7 @@ int phonehome_handle_provision(const uint8_t *uds_data, uint32_t uds_len,
             LOG_WARN("phonehome: no public key available — FC-1 cannot register DCU");
         }
 
+        log_hex_dump("Provision Response", response, (size_t)resp_len);
         return (int)resp_len;
     }
 }
@@ -845,6 +896,8 @@ int phonehome_handle_status(const uint8_t *uds_data, uint32_t uds_len,
 {
     (void)uds_data;
     (void)uds_len;
+
+    LOG_INFO("phonehome: [STATUS] Query received");
 
     if (resp_size < 10) return -1;
 
@@ -897,6 +950,7 @@ int phonehome_handle_status(const uint8_t *uds_data, uint32_t uds_len,
     LOG_INFO("phonehome: status query — status=0x%02X, uptime=%us, tunnel=%s",
              status, up, response[9] ? "active" : "inactive");
 
+    log_hex_dump("Status Response", response, (size_t)10);
     return 10;
 }
 

@@ -13,7 +13,7 @@ set -e
 BASTION_HOST="${1:-bastion-dev.imatrixsys.com}"
 REMOTE_PORT="${2:-0}"
 NONCE="$3"
-LOCAL_SSH_PORT=22222
+LOCAL_SSH_PORT=22
 PHONEHOME_DIR="/etc/phonehome"
 KEY_FILE="${PHONEHOME_DIR}/id_ed25519"
 KNOWN_HOSTS="${PHONEHOME_DIR}/known_hosts"
@@ -54,6 +54,7 @@ timeout "$TUNNEL_TIMEOUT" ssh \
     -o ServerAliveCountMax=3 \
     -o BatchMode=yes \
     -o ConnectTimeout=30 \
+    -o KexAlgorithms=curve25519-sha256 \
     -R "${REMOTE_PORT}:localhost:${LOCAL_SSH_PORT}" \
     "tunnel@${BASTION_HOST}" \
     || log "SSH tunnel exited with code $?"
