@@ -936,9 +936,16 @@ int phonehome_ensure_ssh_user(const phonehome_config_t *cfg)
     char ssh_dir[160];
     char auth_keys_path[192];
 
-    snprintf(home_dir, sizeof(home_dir), "/home/%s", user);
-    snprintf(ssh_dir, sizeof(ssh_dir), "/home/%s/.ssh", user);
-    snprintf(auth_keys_path, sizeof(auth_keys_path), "/home/%s/.ssh/authorized_keys", user);
+    /* Root's home is /root, not /home/root */
+    if (strcmp(user, "root") == 0) {
+        snprintf(home_dir, sizeof(home_dir), "/root");
+        snprintf(ssh_dir, sizeof(ssh_dir), "/root/.ssh");
+        snprintf(auth_keys_path, sizeof(auth_keys_path), "/root/.ssh/authorized_keys");
+    } else {
+        snprintf(home_dir, sizeof(home_dir), "/home/%s", user);
+        snprintf(ssh_dir, sizeof(ssh_dir), "/home/%s/.ssh", user);
+        snprintf(auth_keys_path, sizeof(auth_keys_path), "/home/%s/.ssh/authorized_keys", user);
+    }
 
     /* Check if user's home directory exists — proxy for user existence */
     struct stat st;
