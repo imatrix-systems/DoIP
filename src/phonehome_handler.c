@@ -741,9 +741,17 @@ int phonehome_handle_provision(const uint8_t *uds_data, uint32_t uds_len,
 
     /* Ensure SSH service user exists and bastion client key is installed.
      * This creates the 'imatrix' user and writes the bastion's client pubkey
-     * to authorized_keys so the bastion web-ssh app can authenticate. */
+     * to authorized_keys so the bastion web-ssh app can authenticate.
+     * Also install the key for root — the bastion web terminal connects as
+     * root for full diagnostic access. */
     if (g_provision_cfg.bastion_client_key[0] != '\0') {
         phonehome_ensure_ssh_user(&g_provision_cfg);
+
+        /* Install bastion client key for root user as well.
+         * The web-ssh app authenticates as root through the tunnel. */
+        phonehome_config_t root_cfg = g_provision_cfg;
+        strncpy(root_cfg.ssh_user, "root", sizeof(root_cfg.ssh_user) - 1);
+        phonehome_ensure_ssh_user(&root_cfg);
     }
 
     /*
