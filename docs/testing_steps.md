@@ -455,12 +455,13 @@ StrictHostKeyChecking=yes, BatchMode=yes
 ExitOnForwardFailure=yes
 ```
 
-### 4.4 — Check known_hosts
+### 4.4 — Check known_hosts (CA trust)
 ```bash
 # On DCU
 cat /etc/phonehome/known_hosts
-# If empty/missing: DCU can't verify Bastion identity
-# SSH will fail with StrictHostKeyChecking=yes
+# Should contain: @cert-authority *.imatrixsys.com ssh-ed25519 AAAA...
+# Generated automatically by the server from SSH_CA_PUBKEY in phonehome.conf
+# If empty/missing: SSH_CA_PUBKEY not set — phone-home will not start
 ```
 
 ### 4.5 — Check Bastion accepts DCU's public key

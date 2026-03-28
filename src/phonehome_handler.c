@@ -208,9 +208,9 @@ int phonehome_config_load(phonehome_config_t *cfg, const char *path)
             cfg->bastion_client_key[sizeof(cfg->bastion_client_key) - 1] = '\0';
         }
         else if (strcmp(key, "SSH_CA_PUBKEY") == 0) {
-            /* Empty = static pinning (normal, not an error). Validate non-empty values. */
+            /* Validated as mandatory in phonehome_init(). Parse non-empty values here. */
             if (value[0] == '\0') {
-                /* Intentionally empty — static host key pinning mode */
+                /* Will be caught by phonehome_init() — SSH CA is required */
             } else if (strncmp(value, "ssh-", 4) != 0) {
                 LOG_ERROR("phonehome: SSH_CA_PUBKEY invalid format (must start with 'ssh-')");
             } else if (strchr(value, '\n') != NULL || strchr(value, '\r') != NULL) {
@@ -252,7 +252,7 @@ int phonehome_config_load(phonehome_config_t *cfg, const char *path)
  * ========================================================================== */
 
 /**
- * @brief Write /etc/phonehome/known_hosts — CA mode or static pinning
+ * @brief Write /etc/phonehome/known_hosts — SSH CA trust entry
  *
  * When SSH_CA_PUBKEY is configured, writes an @cert-authority entry that
  * tells OpenSSH to verify the bastion's host certificate against the CA
@@ -418,7 +418,7 @@ int phonehome_init(const phonehome_config_t *cfg)
     LOG_INFO("phonehome: initialized (HMAC secret loaded, script=%s)",
              cfg->connect_script);
 
-    /* Write known_hosts for SSH CA trust or static pinning.
+    /* Write known_hosts with @cert-authority entry from SSH_CA_PUBKEY.
      * Non-fatal — if it fails, the tunnel script falls back to existing known_hosts. */
     phonehome_write_known_hosts(cfg);
 

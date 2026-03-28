@@ -404,7 +404,7 @@ static const char PHONEHOME_CONF_DEFAULT[] =
 "# Bastion SSH client public key — installed in /home/<SSH_USER>/.ssh/authorized_keys\n"
 "# Get from: sudo docker exec web-ssh-bastion-web-1 cat /opt/web-ssh-bastion/bastion_key.pub\n"
 "BASTION_CLIENT_KEY=\n"
-"# SSH CA public key (recommended for fleet). Empty = static host key pinning.\n"
+"# SSH CA public key (required — phone-home will not start without this key).\n"
 "# Get from ops team: cat imatrix_ssh_ca.pub\n"
 "SSH_CA_PUBKEY=\n";
 

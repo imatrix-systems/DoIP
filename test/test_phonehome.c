@@ -208,6 +208,8 @@ static int setup_test_env(void)
     fprintf(f, "HMAC_SECRET_FILE=%s\n", secret_path);
     fprintf(f, "CONNECT_SCRIPT=/bin/true\n");
     fprintf(f, "LOCK_FILE=%s\n", lock_path);
+    fprintf(f, "BASTION_CLIENT_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKeyForUnitTests000000000000000000000 test\n");
+    fprintf(f, "SSH_CA_PUBKEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestCAKeyForUnitTests00000000000000000000 test-ca\n");
     fclose(f);
 
     return 0;

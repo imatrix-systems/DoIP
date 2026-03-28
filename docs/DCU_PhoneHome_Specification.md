@@ -23,7 +23,7 @@
      - 4.5.7 [Dropbear Compatibility (FC-1 / BusyBox)](#457-dropbear-compatibility-fc-1--busybox)
      - 4.5.8 [Key Rotation Procedure](#458-key-rotation-procedure)
      - 4.5.9 [Certificate Validity and Renewal](#459-certificate-validity-and-renewal)
-     - 4.5.10 [Security Analysis: CA vs Static Pinning](#4510-security-analysis-ca-vs-static-pinning)
+     - 4.5.10 [Security Analysis: CA Trust](#4510-security-analysis-ca-trust)
      - 4.5.11 [Implementation Checklist for New DCU](#4511-implementation-checklist-for-new-dcu)
 5. [Component Specifications](#5-component-specifications)
    - 5.1 [DCU: Key Generation and Storage](#51-dcu-key-generation-and-storage)
@@ -146,31 +146,10 @@ This document is intended for developers implementing the solution. It assumes f
 ### 4.3 Bastion Host Key Verification
 
 The DCU must verify the identity of the bastion SSH server before establishing
-a reverse tunnel. Two approaches are supported, in order of preference:
+a reverse tunnel. This is done via SSH Certificate Authority trust (Section 4.5).
 
-1. **SSH Certificate Authority (recommended for fleet)** — Section 4.5
-2. **Static host key pinning (minimum viable)** — Section 4.3.1
-
-#### 4.3.1 Static Host Key Pinning (Current Implementation)
-
-The Bastion's ED25519 host public key is written to `/etc/phonehome/known_hosts`
-on the DCU. This happens in two ways:
-
-- **Build time:** Baked into the firmware OS image (preferred for production)
-- **Runtime:** Delivered by the FC-1 during provisioning (the bastion registration
-  response includes `bastion_pubkey`, which the FC-1 saves to the DCU's
-  `known_hosts` via the DoIP provisioning PDU)
-
-The SSH client must be invoked with:
-```
--o StrictHostKeyChecking=yes
--o UserKnownHostsFile=/etc/phonehome/known_hosts
-```
-
-**Limitation:** If the bastion rotates its host key, every device in the fleet
-needs a firmware update or re-provisioning cycle to receive the new key. For
-fleets of 100+ devices, this is operationally expensive. See Section 4.5 for
-the CA-based alternative that eliminates this problem.
+The SSH CA public key is configured in `phonehome.conf` as `SSH_CA_PUBKEY`.
+Phone-home will not start without it.
 
 ### 4.4 HMAC Shared Secret (FC-1 ↔ DCU)
 
@@ -178,13 +157,14 @@ The HMAC secret is a 32-byte random value provisioned at manufacture, identical 
 
 Provisioning method: FC-1 auto-generates a 32-byte random HMAC secret on first boot (from /dev/urandom) and delivers it to the DCU via DoIP RoutineControl 0xF0A1 provisioning PDU. The secret is stored at /usr/qk/etc/sv/FC-1/hmac_secret (FC-1, yaffs2) and /etc/phonehome/hmac_secret (DCU). No manufacturing step is required.
 
-### 4.5 SSH Certificate Authority Trust (Recommended for Fleet Deployment)
+### 4.5 SSH Certificate Authority Trust
 
-#### 4.5.1 Problem Statement
+The SSH CA model is the required method for bastion host key verification.
 
-Static host key pinning (Section 4.3.1) creates a tight coupling between every
-device in the fleet and a single cryptographic value — the bastion's SSH host
-key. This creates three operational risks:
+#### 4.5.1 Why CA Trust
+
+Without CA trust, each device would need individual bastion host keys — creating
+operational risks:
 
 1. **Key rotation requires fleet-wide firmware update.** If the bastion's host
    key is compromised, rotated, or the bastion is migrated to new infrastructure,
@@ -387,12 +367,9 @@ compromise, or infrastructure migration):
 4. Restart sshd
 5. **No device updates needed** — the CA public key in firmware is unchanged
 
-**With static pinning (legacy):**
-1. Generate new host key on bastion
-2. Build new firmware with updated `known_hosts`
-3. OTA deploy to every device in the fleet
-4. Wait for all devices to update
-5. Only then decommission the old key
+**Without CA trust (not supported):**
+Individual host key pinning would require firmware updates to every device on key
+rotation — operationally infeasible for fleets.
 
 **CA rotation** (rare — only if CA private key is compromised):
 1. Generate new CA key pair
@@ -432,21 +409,17 @@ if [ "$DAYS_LEFT" -lt "$WARN_DAYS" ]; then
 fi
 ```
 
-#### 4.5.10 Security Analysis: CA vs Static Pinning
+#### 4.5.10 Security Analysis: CA Trust
 
-| Threat | Static Pinning | CA Trust |
-|---|---|---|
-| Bastion key compromise | Fleet-wide firmware update required | Re-sign new key with CA, no device update |
-| Bastion infrastructure migration | Fleet-wide firmware update required | Sign new server's key with CA |
-| CA key compromise | N/A | Fleet-wide firmware update required (rare) |
-| MITM with forged host key | Rejected (key mismatch) | Rejected (no valid CA signature) |
-| MITM with stolen bastion key | Accepted (same key) | Accepted (same key) — revocation needed |
-| Expired certificate | N/A (keys don't expire) | Connection rejected until renewed |
-| Multi-bastion deployment | Multiple keys in known_hosts | Single CA, all bastions signed |
-
-**Recommendation:** CA trust is strongly preferred for production fleets.
-Static pinning is acceptable only for development and small deployments
-(< 10 devices) where firmware updates are trivial.
+| Threat | CA Trust |
+|---|---|
+| Bastion key compromise | Re-sign new key with CA, no device update |
+| Bastion infrastructure migration | Sign new server's key with CA |
+| CA key compromise | Fleet-wide firmware update required (rare) |
+| MITM with forged host key | Rejected (no valid CA signature) |
+| MITM with stolen bastion key | Accepted (same key) — revocation needed |
+| Expired certificate | Connection rejected until renewed |
+| Multi-bastion deployment | Single CA, all bastions signed |
 
 #### 4.5.11 Implementation Checklist for New DCU
 
@@ -570,7 +543,6 @@ Content-Format: application/json
 {
     "status": "ok",
     "tunnel_port": 10016,
-    "bastion_pubkey": "ssh-ed25519 AAAA... bastion",
     "bastion_client_pubkey": "ssh-ed25519 AAAA... bastion"
 }
 ```
@@ -1918,4 +1890,4 @@ Before integrating, review these existing files and APIs in your DoIP server cod
 | DEC-09 | Cellular PMTU black hole | **Resolved.** ppp0 MTU set to 1400 + tcp_mtu_probing=1 on cellular connect. Carriers silently drop packets > real path MTU. | 2026-03-27 |
 | DEC-10 | ForceCommand for tunnel user | **Resolved.** Must use sleep infinity, not /bin/false. /bin/false exits immediately, causing sshd to close the session and drop reverse port forwards. | 2026-03-27 |
 | DEC-11 | Provisioning token (JWT) for DCU registration | **Removed.** Direct DCU→bastion HTTPS registration was superseded by FC-1 CoAP proxy registration. No manufacturing-time tokens needed. | 2026-03-27 |
-| DEC-12 | SSH host key trust model | **CA trust recommended for fleet.** Static pinning acceptable for dev/small deployments. @cert-authority in known_hosts, OpenSSH >= 5.4 required on DCU. Dropbear (FC-1) uses TOFU. | 2026-03-28 |
+| DEC-12 | SSH host key trust model | **CA trust mandatory.** `SSH_CA_PUBKEY` required in phonehome.conf; phone-home will not start without it. @cert-authority in known_hosts, OpenSSH >= 5.4 required on DCU. Dropbear (FC-1) uses TOFU. `bastion_pubkey` removed from bastion registration response. | 2026-03-28 |

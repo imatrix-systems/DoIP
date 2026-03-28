@@ -9,9 +9,7 @@ sequenceDiagram
 
     Note over FC1: Network Online
     FC1->>BASTION: 3. POST /api/v1/devices/{sn}/pubkey<br/>(Register SSH public key)
-    BASTION-->>FC1: tunnel_port assigned +<br/>bastion_pubkey + bastion_client_key
-
-    FC1->>FC1: Save bastion host key<br/>to known_hosts
+    BASTION-->>FC1: tunnel_port assigned +<br/>bastion_client_key
 
     Note over FC1,DCU: LAN Discovery
     FC1->>DCU: 4. DoIP UDP broadcast<br/>(Vehicle ID Request, bind eth0)
