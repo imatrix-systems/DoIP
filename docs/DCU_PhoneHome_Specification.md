@@ -36,8 +36,15 @@
     - 11.3 [End-to-End Tests](#113-end-to-end-tests)
     - 11.4 [Security Tests](#114-security-tests)
     - 11.5 [Fleet Regression Test](#115-fleet-regression-test)
-12. [Recommended Source Files and Dependencies](#12-recommended-source-files-and-dependencies)
-13. [Open Issues and Decision Log](#13-open-issues-and-decision-log)
+12. [Debugging Guide — Protocol Log Reference](#12-debugging-guide--protocol-log-reference)
+    - 12.1 [Enabling Debug Output](#121-enabling-debug-output)
+    - 12.2 [Provisioning Flow — Expected Log Output](#122-provisioning-flow--expected-log-output)
+    - 12.3 [Phone-Home Trigger Flow — Expected Log Output](#123-phone-home-trigger-flow--expected-log-output)
+    - 12.4 [Health Check Flow — Expected Log Output](#124-health-check-flow--expected-log-output)
+    - 12.5 [Common Failure Patterns](#125-common-failure-patterns)
+    - 12.6 [Flow Diagrams](#126-flow-diagrams)
+13. [Recommended Source Files and Dependencies](#13-recommended-source-files-and-dependencies)
+14. [Open Issues and Decision Log](#14-open-issues-and-decision-log)
 
 ---
 
@@ -1200,7 +1207,386 @@ echo "Results: $PASS passed, $FAIL failed out of $N"
 
 ---
 
-## 12. Recommended Source Files and Dependencies
+## 12. Debugging Guide — Protocol Log Reference
+
+This section documents the log output from both the FC-1 relay and DCU DoIP server
+to help developers trace the phone-home flow during implementation and debugging.
+
+### 12.1 Enabling Debug Output
+
+**FC-1 (Gateway):**
+```bash
+# Enable DoIP relay debug logging via CLI
+app> debug DEBUGS_APP_DOIP_RELAY
+
+# View relay logs
+tail -f /var/log/fc-1.log | grep doip_relay
+```
+
+**DCU (DoIP Server):**
+```bash
+# Run with verbose flag for DEBUG level
+sudo ./bin/doip-server -c ./etc/doip-server.conf -l ./log/server.log -v
+
+# View phone-home logs
+tail -f ./log/server.log | grep phonehome
+```
+
+### 12.2 Provisioning Flow — Expected Log Output
+
+#### FC-1 Side (Provisioning PDU Construction)
+
+When the FC-1 provisions the DCU, the relay logs show the complete PDU structure:
+
+```
+[00:00:20.099] doip_relay: === DCU Provision PDU (0xF0A1) ===
+[00:00:20.100] doip_relay:   SID:        0x31 (RoutineControl)
+[00:00:20.100] doip_relay:   SubFunc:    0x01 (startRoutine)
+[00:00:20.100] doip_relay:   RoutineId:  0xF0A1 (provision)
+[00:00:20.100] doip_relay:   CAN SN:     186137189 (0x0B183A65)
+[00:00:20.100] doip_relay:   HMAC Secret: [32 bytes at offset 8]
+[00:00:20.100] doip_relay:   Bastion:    bastion-dev.imatrixsys.com:22 (at offset 42)
+[00:00:20.100] doip_relay:   Total PDU:  69 bytes
+[00:00:20.113] doip_relay: provision OK — HMAC secret delivered to DCU
+```
+
+**PDU byte layout:**
+```
+Offset  Length  Field
+ 0      1       SID: 0x31 (RoutineControl)
+ 1      1       SubFunc: 0x01 (startRoutine)
+ 2-3    2       RoutineId: 0xF0 0xA1
+ 4-7    4       CAN SN (big-endian uint32)
+ 8-39   32      HMAC-SHA256 shared secret
+ 40-41  2       Bastion port (big-endian uint16)
+ 42+    N+1     Bastion hostname (null-terminated string)
+ 42+N+1 M+1     Bastion client pubkey (null-terminated, optional)
+```
+
+#### DCU Side (Provisioning PDU Reception)
+
+The DoIP server logs the received PDU with a full hex dump:
+
+```
+[19:49:33] phonehome: --- Provision PDU (0xF0A1) (69 bytes) ---
+[19:49:33] phonehome:   [0000] 31 01 F0 A1 0B 18 3A 65 xx xx xx xx xx xx xx xx  | 1.....:e........
+[19:49:33] phonehome:   [0010] xx xx xx xx xx xx xx xx xx xx xx xx xx xx xx xx  | ................
+[19:49:33] phonehome:   [0020] xx xx xx xx xx xx xx xx 00 16 62 61 73 74 69 6F  | ..........bastio
+[19:49:33] phonehome:   [0030] 6E 2D 64 65 76 2E 69 6D 61 74 72 69 78 73 79 73  | n-dev.imatrixsys
+[19:49:33] phonehome:   [0040] 2E 63 6F 6D 00                                   | .com.
+[19:49:33] phonehome: [PROV STEP 1] CAN SN: 186137189 (0x0B183A65)
+[19:49:33] phonehome: [PROV STEP 2] HMAC secret written to /etc/phonehome/hmac_secret (32 bytes, atomic)
+[19:49:33] phonehome: [PROV STEP 3] Bastion: bastion-dev.imatrixsys.com:22
+[19:49:33] phonehome: [PROV STEP 4] Bastion client key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
+[19:49:33] phonehome: [PROV STEP 5] SSH user setup complete (imatrix + root)
+[19:49:33] phonehome: [PROV STEP 6] Returning DCU pubkey (94 bytes) in response
+```
+
+### 12.3 Phone-Home Trigger Flow — Expected Log Output
+
+#### FC-1 Side (Trigger Relay)
+
+When a CoAP phone-home trigger arrives at the FC-1 and is relayed to the DCU:
+
+```
+[00:01:27.778] doip_relay: CoAP DCU phone_home trigger received (type=NON, hmac=loaded, doip=enabled)
+[00:01:27.922] doip_relay: DCU discovered at 192.168.7.101:13400
+[00:01:27.922] doip_relay: === DCU Phone-Home Trigger PDU (0xF0A0) ===
+[00:01:27.922] doip_relay:   SID:        0x31 (RoutineControl)
+[00:01:27.922] doip_relay:   SubFunc:    0x01 (startRoutine)
+[00:01:27.922] doip_relay:   RoutineId:  0xF0A0 (phone-home trigger)
+[00:01:27.922] doip_relay:   Nonce:      9423b0f3ec3acef1
+[00:01:27.922] doip_relay:   HMAC:       [32 bytes at offset 12]
+[00:01:27.922] doip_relay:   Bastion:    bastion-dev.imatrixsys.com:10017 (29 bytes at offset 44)
+[00:01:27.922] doip_relay:   Total PDU:  73 bytes
+[00:01:27.938] doip_relay: DCU phone-home relay OK — tunnel initiating
+```
+
+**Trigger PDU byte layout:**
+```
+Offset  Length  Field
+ 0      1       SID: 0x31 (RoutineControl)
+ 1      1       SubFunc: 0x01 (startRoutine)
+ 2-3    2       RoutineId: 0xF0 0xA0
+ 4-11   8       Nonce (random, from /dev/urandom)
+ 12-43  32      HMAC-SHA256(secret, nonce)
+ 44+    N+1     Bastion hostname (null-terminated, optional)
+ 44+N+1 2       Bastion tunnel port (big-endian uint16, optional)
+```
+
+#### DCU Side (Trigger Reception and Validation)
+
+The DoIP server shows the complete validation pipeline:
+
+```
+[19:51:07] phonehome: --- Trigger PDU (0xF0A0) (73 bytes) ---
+[19:51:07] phonehome:   [0000] 31 01 F0 A0 94 23 B0 F3 EC 3A CE F1 93 4C 06 DC  | 1....#...:...L..
+[19:51:07] phonehome:   [0010] AC A3 08 96 11 D1 F1 C5 0A 01 4A 5D 82 B6 6D E3  | ..........J]..m.
+[19:51:07] phonehome:   [0020] DA 97 42 40 88 0D 47 21 88 5D 7F B7 62 61 73 74  | ..B@..G!.]..bast
+[19:51:07] phonehome:   [0030] 69 6F 6E 2D 64 65 76 2E 69 6D 61 74 72 69 78 73  | ion-dev.imatrixs
+[19:51:07] phonehome:   [0040] 79 73 2E 63 6F 6D 00 27 21                       | ys.com.'!
+[19:51:07] phonehome: [STEP 1] Nonce extracted: 9423b0f3ec3acef1
+[19:51:07] phonehome: [STEP 2] HMAC computed — comparing 32 bytes
+[19:51:07] phonehome: [STEP 3] HMAC verification PASSED
+[19:51:07] phonehome: [STEP 4] Replay check PASSED (nonce is fresh)
+[19:51:07] phonehome: [STEP 5] Bastion target: bastion-dev.imatrixsys.com:10017
+[19:51:07] phonehome: [STEP 6] Spawning tunnel: /usr/sbin/phonehome-connect.sh bastion-dev.imatrixsys.com 10017 9423b0f3ec3acef1
+[19:51:07] phonehome: trigger accepted. Bastion=bastion-dev.imatrixsys.com Port=10017 Nonce=9423b0f3ec3acef1
+[19:51:07] phonehome: [STEP 7] Positive response sent: 0x71 0x01 0xF0 0xA0 0x02 (routineRunning)
+```
+
+### 12.4 Health Check Flow — Expected Log Output
+
+The FC-1 periodically queries the DCU status via routineId 0xF0A2:
+
+**FC-1 side:**
+```
+[00:00:53.597] doip_relay: === DCU Health Check (0xF0A2) ===
+[00:00:53.597] doip_relay:   Response status: 0x00 (fully provisioned)
+```
+
+**DCU side:**
+```
+[19:49:33] phonehome: [STATUS] Query received
+[19:49:33] phonehome: status query — status=0x00, uptime=23s, tunnel=inactive
+[19:49:33] phonehome: --- Status Response (10 bytes) ---
+[19:49:33] phonehome:   [0000] 71 01 F0 A2 00 00 00 00 17 00   | q.........
+```
+
+**Status response byte layout:**
+```
+Offset  Length  Field
+ 0      1       Response SID: 0x71 (positive response)
+ 1      1       SubFunc echo: 0x01
+ 2-3    2       RoutineId echo: 0xF0 0xA2
+ 4      1       Status: 0x00=provisioned, 0x01=HMAC only, 0x02=needs re-provision
+ 5-8    4       Uptime in seconds (big-endian uint32)
+ 9      1       Tunnel active: 0x00=inactive, 0x01=active
+```
+
+**Status codes and FC-1 actions:**
+
+| Status | Meaning | FC-1 Action |
+|--------|---------|-------------|
+| 0x00 | Fully provisioned (HMAC + bastion key) | No action needed |
+| 0x01 | HMAC loaded but no bastion client key | Re-provision with bastion client key |
+| 0x02 | Needs re-provision | Send full provision PDU (0xF0A1) |
+
+### 12.5 Common Failure Patterns
+
+#### HMAC Verification Failed
+```
+phonehome: [STEP 2] HMAC computed — comparing 32 bytes
+phonehome: HMAC verification FAILED — possible spoofing attempt
+phonehome: NRC 0x35 (invalidKey) sent
+```
+**Cause:** HMAC secret mismatch between FC-1 and DCU. FC-1 may have regenerated
+its secret (first boot) while DCU retains old one.
+**Fix:** Restart FC-1 to trigger re-provisioning.
+
+#### Replay Detected
+```
+phonehome: [STEP 4] Replay check FAILED — nonce already seen
+phonehome: NRC 0x24 (requestSequenceError) sent
+```
+**Cause:** Same nonce used twice within 300-second TTL window.
+**Fix:** This is a security mechanism — wait for TTL expiry or investigate source.
+
+#### Tunnel Already Active
+```
+phonehome: trigger rejected — tunnel already active
+```
+**Cause:** Lock file exists with live PID from previous trigger.
+**Fix:** Wait for existing tunnel TTL to expire, or manually kill the tunnel process.
+
+#### DCU Relay Failed — No DoIP Entity
+```
+doip_relay: DCU relay failed — no DoIP entity found on LAN (bind=192.168.7.1)
+```
+**Cause:** DoIP server not running on DCU, or UDP broadcast not reaching DCU.
+**Fix:** Verify DoIP server is running on DCU port 13400. Check eth0 connectivity.
+
+#### DNS Resolution Failed (DCU SSH tunnel)
+```
+phonehome-connect: SSH tunnel exited with code 255
+```
+**Cause:** DCU cannot resolve bastion hostname. Common when NAT is active but
+DNS is not configured through the FC-1.
+**Fix:** Ensure DNS is configured on DCU: `resolvectl dns <iface> 8.8.8.8`
+
+#### SSH Key Exchange Timeout (cellular MTU)
+```
+debug1: expecting SSH2_MSG_KEX_ECDH_REPLY
+```
+**Cause:** Post-quantum kex algorithm (sntrup761) generates packets exceeding
+cellular path MTU. Connection hangs during key exchange.
+**Fix:** Force `curve25519-sha256` in phonehome-connect.sh via `-o KexAlgorithms=curve25519-sha256`.
+Also ensure FC-1 MSS clamping uses `--set-mss 1360` (not `--clamp-mss-to-pmtu`).
+
+#### BASTION_CLIENT_KEY Missing
+```
+phonehome: BASTION_CLIENT_KEY not configured in phonehome.conf
+phonehome: Phone-home DISABLED — bastion cannot authenticate to DCU without this key
+```
+**Cause:** The bastion SSH client public key is not in phonehome.conf.
+**Fix:** Get the key: `cat /opt/web-ssh-bastion/bastion_key.pub` on the bastion,
+then add it to `BASTION_CLIENT_KEY=` in phonehome.conf.
+
+#### Connection Sharing Not Active
+```
+doip_relay: connection sharing not configured — force-enabling on eth0
+```
+or in CLI:
+```
+=== DCU Internet Access ===
+  NAT Sharing:  INACTIVE
+  Config:       *** WARNING — DCU has no internet access ***
+```
+**Cause:** `use_connection_sharing` flag not set in device configuration.
+**Fix:** Run `net mode eth0 server sharing on` on the FC-1 CLI, then reboot.
+
+### 12.6 Flow Diagrams
+
+#### Complete Phone-Home Trigger Flow
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator (Web UI)
+    participant B as Bastion Server
+    participant Cloud as iMatrix Cloud
+    participant FC1 as FC-1 Gateway
+    participant DCU as DCU (DoIP Server)
+
+    Op->>B: Click "Connect" on DCU
+    B->>Cloud: CoAP POST /remote_call_home/{can_sn}
+    Cloud->>FC1: CoAP POST (via DTLS session)
+
+    Note over FC1: CoAP handler fires
+    FC1->>FC1: Generate 8-byte nonce
+    FC1->>FC1: HMAC-SHA256(secret, nonce)
+    FC1->>FC1: Build 0xF0A0 PDU (73 bytes)
+
+    FC1->>DCU: DoIP UDP broadcast (discovery)
+    DCU-->>FC1: Vehicle ID Response
+    FC1->>DCU: DoIP TCP connect + routing activation
+    FC1->>DCU: Diagnostic Message: SID 0x31 (RoutineControl 0xF0A0)
+
+    Note over DCU: phonehome_handle_routine()
+    DCU->>DCU: [STEP 1] Extract nonce
+    DCU->>DCU: [STEP 2] Compute HMAC
+    DCU->>DCU: [STEP 3] Verify HMAC (constant-time)
+    DCU->>DCU: [STEP 4] Check replay cache
+    DCU->>DCU: [STEP 5] Extract bastion host:port
+    DCU->>DCU: [STEP 6] Spawn phonehome-connect.sh
+    DCU-->>FC1: Positive Response: 0x71 (routineRunning)
+
+    Note over DCU: phonehome-connect.sh
+    DCU->>B: SSH -R 10017:localhost:22 tunnel@bastion
+    B-->>DCU: SSH session established
+
+    Note over B: Port 10017 now listening
+    B->>DCU: SSH through tunnel (port 10017)
+    DCU-->>B: Shell access
+    B-->>Op: Web terminal connected
+```
+
+#### Zero-Touch Provisioning Flow
+
+```mermaid
+sequenceDiagram
+    participant FC1 as FC-1 Gateway
+    participant Cloud as iMatrix Cloud
+    participant B as Bastion Server
+    participant DCU as DCU (DoIP Server)
+
+    Note over FC1: Boot sequence
+    FC1->>FC1: Generate HMAC secret (first boot)
+    FC1->>FC1: Generate SSH key pair (first boot)
+
+    Note over FC1: DTLS session established
+    FC1->>Cloud: CoAP PUT remote-access/register/{fc1_sn}
+    Cloud->>B: Proxy registration
+    B-->>Cloud: {tunnel_port, bastion_pubkey, bastion_client_pubkey}
+    Cloud-->>FC1: Registration response
+
+    FC1->>FC1: Save bastion host key (known_hosts)
+    FC1->>FC1: Install bastion client key (authorized_keys)
+    FC1->>FC1: Extract tunnel.sh script
+    FC1->>B: SSH reverse tunnel (persistent)
+
+    Note over FC1: DoIP discovery on eth0
+    FC1->>DCU: UDP broadcast: Vehicle ID Request
+    DCU-->>FC1: Vehicle ID Response (192.168.7.101:13400)
+    FC1->>DCU: TCP connect + routing activation
+
+    Note over FC1: Provision PDU (0xF0A1)
+    FC1->>DCU: SID 0x31: HMAC secret + bastion host + client key
+    DCU->>DCU: Store HMAC secret (atomic write)
+    DCU->>DCU: Create SSH user (imatrix + root)
+    DCU->>DCU: Install bastion client key
+    DCU->>DCU: Generate SSH key pair
+    DCU-->>FC1: Positive response + DCU public key
+
+    Note over FC1: Register DCU with bastion
+    FC1->>Cloud: CoAP PUT remote-access/register/{can_sn}
+    Cloud->>B: Proxy DCU registration
+    B-->>Cloud: {tunnel_port: 10017}
+    Cloud-->>FC1: DCU tunnel port assigned
+
+    Note over FC1: Enable NAT
+    FC1->>FC1: iptables MASQUERADE eth0 → ppp0
+    FC1->>FC1: MSS clamp --set-mss 1360
+
+    Note over FC1: Health check loop
+    FC1->>DCU: SID 0x31: Status query (0xF0A2)
+    DCU-->>FC1: Status: 0x00 (fully provisioned)
+```
+
+#### Network Path for DCU Tunnel
+
+```mermaid
+graph LR
+    DCU[DCU<br/>192.168.7.101:22] -->|eth0| FC1[FC-1<br/>192.168.7.1]
+    FC1 -->|NAT/MASQUERADE| PPP0[ppp0<br/>Cellular]
+    PPP0 -->|MTU 1400<br/>MSS 1360| Internet((Internet))
+    Internet --> Bastion[Bastion<br/>34.136.241.1:22]
+
+    style DCU fill:#f9f,stroke:#333
+    style FC1 fill:#bbf,stroke:#333
+    style Bastion fill:#bfb,stroke:#333
+
+    subgraph "Reverse SSH Tunnel"
+        Bastion -->|port 10017| DCU
+    end
+```
+
+#### Connection Sharing Decision Tree
+
+```mermaid
+flowchart TD
+    A[FC-1 Boot] --> B{DoIP server<br/>discovered?}
+    B -->|No| C[Retry discovery<br/>every 30s]
+    B -->|Yes| D[Send provision<br/>PDU 0xF0A1]
+    D --> E{Provision<br/>accepted?}
+    E -->|No| F[Retry up to<br/>3 times]
+    E -->|Yes| G{use_connection_sharing<br/>in config?}
+    G -->|Yes| H[apply_all_connection_sharing]
+    G -->|No| I{NAT already<br/>active?}
+    I -->|Yes| J[Log: already active]
+    I -->|No| K{WAN interface<br/>available?}
+    K -->|ppp0| L[Force enable:<br/>eth0 → ppp0]
+    K -->|wlan0| M[Force enable:<br/>eth0 → wlan0]
+    K -->|None| N[Log WARNING:<br/>DCU has no internet]
+    H --> O[NAT active]
+    L --> O
+    M --> O
+    J --> O
+    O --> P[DCU can reach bastion<br/>Phone-home ready]
+```
+
+---
+
+## 13. Recommended Source Files and Dependencies
 
 The following existing projects provide tested, production-quality code that you should incorporate rather than re-implement.
 
@@ -1319,7 +1705,7 @@ Before integrating, review these existing files and APIs in your DoIP server cod
 
 ---
 
-## 13. Open Issues and Decision Log
+## 14. Open Issues and Decision Log
 
 | ID | Issue | Decision | Date |
 |---|---|---|---|
