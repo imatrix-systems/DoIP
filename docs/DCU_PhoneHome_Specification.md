@@ -1,6 +1,6 @@
 # DCU Phone-Home Capability — Developer Specification
 
-**Version:** 3.0.0
+**Version:** 3.1.0
 **Status:** Implementation Complete — End-to-end validated 2026-03-27 (FC-1 + DCU + Bastion web terminal)
 **Applies To:** FC-1 (BusyBox 4G Telematics Gateway), DCU (Diagnostic Control Unit, Ubuntu/BusyBox embedded), Bastion Server
 **Standards:** ISO 13400 (DoIP), ISO 21434, UNECE WP.29, RFC 4253 (SSH)
@@ -13,6 +13,18 @@
 2. [Glossary](#2-glossary)
 3. [System Architecture](#3-system-architecture)
 4. [Security Model and Key Management](#4-security-model-and-key-management)
+   - 4.5 [SSH Certificate Authority Trust](#45-ssh-certificate-authority-trust-recommended-for-fleet-deployment)
+     - 4.5.1 [Problem Statement](#451-problem-statement)
+     - 4.5.2 [Solution: SSH Certificate Authority](#452-solution-ssh-certificate-authority)
+     - 4.5.3 [Cryptographic Assets (CA Model)](#453-cryptographic-assets-ca-model)
+     - 4.5.4 [CA Setup Procedure](#454-ca-setup-procedure-one-time-operations-team)
+     - 4.5.5 [Device Configuration (Firmware Build)](#455-device-configuration-firmware-build)
+     - 4.5.6 [phonehome-connect.sh Changes](#456-phonehome-connectsh-changes)
+     - 4.5.7 [Dropbear Compatibility (FC-1 / BusyBox)](#457-dropbear-compatibility-fc-1--busybox)
+     - 4.5.8 [Key Rotation Procedure](#458-key-rotation-procedure)
+     - 4.5.9 [Certificate Validity and Renewal](#459-certificate-validity-and-renewal)
+     - 4.5.10 [Security Analysis: CA vs Static Pinning](#4510-security-analysis-ca-vs-static-pinning)
+     - 4.5.11 [Implementation Checklist for New DCU](#4511-implementation-checklist-for-new-dcu)
 5. [Component Specifications](#5-component-specifications)
    - 5.1 [DCU: Key Generation and Storage](#51-dcu-key-generation-and-storage)
    - 5.2 [DCU: Bastion Registration](#52-dcu-bastion-registration)
@@ -120,6 +132,8 @@ This document is intended for developers implementing the solution. It assumes f
 | FC-1 private key | FC-1 | ED25519 | `/etc/phonehome/id_ed25519` | FC-1 filesystem |
 | FC-1 public key | FC-1 → Bastion | ED25519 | Registered at Bastion | N/A (public) |
 | Bastion host public key | Bastion | ED25519 | Pinned in firmware / config | N/A (public) |
+| SSH CA private key | iMatrix Operations | ED25519 | HSM or encrypted offline storage | iMatrix HSM only |
+| SSH CA public key | All devices | ED25519 | `/etc/phonehome/ssh_ca.pub` in firmware | N/A (public) |
 | HMAC shared secret | FC-1 + DCU | HMAC-SHA256 | `/etc/phonehome/hmac_secret` (600, root) | Neither device |
 
 ### 4.2 Key Generation Policy
@@ -129,17 +143,322 @@ This document is intended for developers implementing the solution. It assumes f
 - Key generation must be seeded from a hardware entropy source. On Linux, read from `/dev/random` (blocking) for key generation, not `/dev/urandom`. Verify `/proc/sys/kernel/random/entropy_avail` > 256 before generating.
 - After generation, the private key file permissions must be set to `0600`, owned by root. Verify this in the provisioning script.
 
-### 4.3 Bastion Host Key Pinning
+### 4.3 Bastion Host Key Verification
 
-The Bastion's ED25519 host public key must be **embedded in the device firmware at build time** and written to `/etc/phonehome/known_hosts` during OS image build. It must not be fetched dynamically. The SSH client must be invoked with `-o StrictHostKeyChecking=yes` and `-o UserKnownHostsFile=/etc/phonehome/known_hosts`.
+The DCU must verify the identity of the bastion SSH server before establishing
+a reverse tunnel. Two approaches are supported, in order of preference:
 
-If the Bastion host key is rotated (planned key rotation), a firmware update must distribute the new host key before the old one expires. Overlap period of at minimum 30 days is required.
+1. **SSH Certificate Authority (recommended for fleet)** — Section 4.5
+2. **Static host key pinning (minimum viable)** — Section 4.3.1
+
+#### 4.3.1 Static Host Key Pinning (Current Implementation)
+
+The Bastion's ED25519 host public key is written to `/etc/phonehome/known_hosts`
+on the DCU. This happens in two ways:
+
+- **Build time:** Baked into the firmware OS image (preferred for production)
+- **Runtime:** Delivered by the FC-1 during provisioning (the bastion registration
+  response includes `bastion_pubkey`, which the FC-1 saves to the DCU's
+  `known_hosts` via the DoIP provisioning PDU)
+
+The SSH client must be invoked with:
+```
+-o StrictHostKeyChecking=yes
+-o UserKnownHostsFile=/etc/phonehome/known_hosts
+```
+
+**Limitation:** If the bastion rotates its host key, every device in the fleet
+needs a firmware update or re-provisioning cycle to receive the new key. For
+fleets of 100+ devices, this is operationally expensive. See Section 4.5 for
+the CA-based alternative that eliminates this problem.
 
 ### 4.4 HMAC Shared Secret (FC-1 ↔ DCU)
 
 The HMAC secret is a 32-byte random value provisioned at manufacture, identical on both FC-1 and the paired DCU. It authenticates DoIP phone-home trigger messages from FC-1 to DCU, ensuring a spoofed device on the local LAN cannot trigger a phone-home. The secret must be different for every FC-1/DCU pair.
 
 Provisioning method: FC-1 auto-generates a 32-byte random HMAC secret on first boot (from /dev/urandom) and delivers it to the DCU via DoIP RoutineControl 0xF0A1 provisioning PDU. The secret is stored at /usr/qk/etc/sv/FC-1/hmac_secret (FC-1, yaffs2) and /etc/phonehome/hmac_secret (DCU). No manufacturing step is required.
+
+### 4.5 SSH Certificate Authority Trust (Recommended for Fleet Deployment)
+
+#### 4.5.1 Problem Statement
+
+Static host key pinning (Section 4.3.1) creates a tight coupling between every
+device in the fleet and a single cryptographic value — the bastion's SSH host
+key. This creates three operational risks:
+
+1. **Key rotation requires fleet-wide firmware update.** If the bastion's host
+   key is compromised, rotated, or the bastion is migrated to new infrastructure,
+   every DCU and FC-1 must receive the new key before they can reconnect.
+
+2. **Multi-bastion deployment is impractical.** If the fleet spans multiple
+   bastions (geo-redundancy, staging vs production), each device needs the host
+   key for every bastion it might connect to.
+
+3. **Disaster recovery is slow.** If the bastion is rebuilt on new hardware
+   (new host key), devices cannot reconnect until they receive the new key via
+   OTA — which requires the very connectivity that is broken.
+
+#### 4.5.2 Solution: SSH Certificate Authority
+
+OpenSSH supports a Certificate Authority (CA) model where:
+
+- A **CA key pair** is generated once and the private key is stored securely
+  (HSM, offline machine, or encrypted vault)
+- The bastion's SSH host key is **signed by the CA**, producing a host certificate
+- Devices trust the **CA public key** instead of individual host keys
+- When the bastion's host key rotates, only the host certificate needs
+  re-signing — no device updates required
+
+This is the same trust model as TLS/HTTPS (the developer's `bastion-ca.crt`
+analogy), applied to SSH.
+
+#### 4.5.3 Cryptographic Assets (CA Model)
+
+| Asset | Owner | Algorithm | Storage | Sensitivity |
+|---|---|---|---|---|
+| SSH CA private key | iMatrix Operations | ED25519 | HSM or encrypted offline storage | **CRITICAL** — compromise allows impersonation of any bastion |
+| SSH CA public key | All devices | ED25519 | `/etc/phonehome/ssh_ca.pub` in firmware | **Public** — safe to embed in firmware, commit to repos |
+| Bastion host key | Bastion server | ED25519 | `/etc/ssh/ssh_host_ed25519_key` | Server-local, standard SSH |
+| Bastion host certificate | Bastion server | ED25519 (signed by CA) | `/etc/ssh/ssh_host_ed25519_key-cert.pub` | **Public** — generated by CA signing |
+
+**Critical security invariant:** The SSH CA private key must **never** be stored
+on the bastion server, on any device, or in any repository. It should reside in
+an HSM (Hardware Security Module) or an air-gapped machine used solely for
+certificate signing operations.
+
+#### 4.5.4 CA Setup Procedure (One-Time, Operations Team)
+
+**Step 1: Generate the SSH CA key pair**
+
+```bash
+# On an air-gapped machine or HSM-connected workstation
+# NOT on the bastion, NOT on any device
+
+ssh-keygen -t ed25519 -f imatrix_ssh_ca -C "iMatrix SSH CA $(date +%Y)"
+# Produces:
+#   imatrix_ssh_ca       — CA private key (PROTECT THIS)
+#   imatrix_ssh_ca.pub   — CA public key (distribute to all devices)
+```
+
+**Step 2: Secure the CA private key**
+
+```bash
+# Option A: Store in HSM (production)
+# Use pkcs11-provider or ssh-agent with HSM token
+
+# Option B: Encrypted offline storage (development)
+# Encrypt with a strong passphrase, store on USB drive in a safe
+gpg --symmetric --cipher-algo AES256 imatrix_ssh_ca
+shred -u imatrix_ssh_ca  # Remove plaintext from disk
+```
+
+**Step 3: Sign the bastion's host key**
+
+```bash
+# Retrieve the bastion's public host key
+scp bastion-dev:/etc/ssh/ssh_host_ed25519_key.pub ./bastion_host.pub
+
+# Sign it with the CA (produces bastion_host-cert.pub)
+ssh-keygen -s imatrix_ssh_ca \
+    -I "bastion-dev.imatrixsys.com" \
+    -h \
+    -n "bastion-dev.imatrixsys.com" \
+    -V +52w \
+    -z 1 \
+    bastion_host.pub
+
+# Arguments:
+#   -s imatrix_ssh_ca    Sign with CA private key
+#   -I "bastion-dev..."  Certificate identity (for logging)
+#   -h                   Host certificate (not user certificate)
+#   -n "bastion-dev..."  Valid principal (hostname the cert is valid for)
+#   -V +52w              Valid for 52 weeks (1 year)
+#   -z 1                 Serial number (increment for each signing)
+```
+
+**Step 4: Install the host certificate on the bastion**
+
+```bash
+# Copy certificate to bastion
+scp bastion_host-cert.pub bastion-dev:/etc/ssh/ssh_host_ed25519_key-cert.pub
+
+# Add to bastion's sshd_config:
+echo "HostCertificate /etc/ssh/ssh_host_ed25519_key-cert.pub" >> /etc/ssh/sshd_config
+
+# Restart sshd
+systemctl restart ssh
+```
+
+**Step 5: Verify the certificate**
+
+```bash
+# On the bastion — inspect the certificate
+ssh-keygen -L -f /etc/ssh/ssh_host_ed25519_key-cert.pub
+
+# Expected output includes:
+#   Type: ssh-ed25519-cert-v01@openssh.com host certificate
+#   Public key: ED25519-CERT SHA256:...
+#   Signing CA: ED25519 SHA256:... (using ssh-ed25519)
+#   Key ID: "bastion-dev.imatrixsys.com"
+#   Valid: from 2026-03-28T00:00:00 to 2027-03-28T00:00:00
+#   Principals:
+#     bastion-dev.imatrixsys.com
+```
+
+#### 4.5.5 Device Configuration (Firmware Build)
+
+The CA public key is embedded in the device firmware. This replaces the static
+host key in `known_hosts`.
+
+**File: `/etc/phonehome/ssh_ca.pub`**
+
+```
+# iMatrix SSH Certificate Authority — public key
+# This file is PUBLIC and safe to embed in firmware
+# It allows the device to trust any bastion whose host key
+# has been signed by the iMatrix SSH CA
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... iMatrix SSH CA 2026
+```
+
+**File: `/etc/phonehome/known_hosts`**
+
+```
+# Trust any host key signed by the iMatrix SSH CA
+# The @cert-authority directive tells OpenSSH to verify the host
+# certificate chain instead of matching a specific host key
+@cert-authority bastion-dev.imatrixsys.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... iMatrix SSH CA 2026
+```
+
+The `@cert-authority` prefix tells OpenSSH: "Instead of comparing the server's
+host key directly, verify that the server presents a valid host certificate
+signed by this CA, and that the certificate's principal matches the hostname."
+
+**For wildcard trust** (multiple bastions under *.imatrixsys.com):
+
+```
+@cert-authority *.imatrixsys.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... iMatrix SSH CA 2026
+```
+
+#### 4.5.6 phonehome-connect.sh Changes
+
+The tunnel script requires no code changes when using CA trust. The same
+SSH options work:
+
+```bash
+ssh \
+    -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile=/etc/phonehome/known_hosts \
+    ...
+```
+
+OpenSSH automatically checks for `@cert-authority` entries in `known_hosts`.
+If the server presents a valid certificate signed by the trusted CA, the
+connection proceeds. If the server has no certificate or an invalid one,
+`StrictHostKeyChecking=yes` rejects the connection.
+
+**No `-o StrictHostKeyChecking=accept-new` or `-y` (TOFU) should ever be used
+in production.** These bypass the trust chain entirely.
+
+#### 4.5.7 Dropbear Compatibility (FC-1 / BusyBox)
+
+Dropbear's `dbclient` (used by the FC-1) does **not** support SSH certificate
+authorities. The FC-1 tunnel uses `-y` (TOFU — Trust On First Use) and clears
+stale host keys before each connection.
+
+This is acceptable for the FC-1 because:
+- The FC-1 is within Trust Boundary B (Section 3.2) — it has its own
+  authenticated DTLS session to the cloud
+- The FC-1's tunnel is a persistent connection, not on-demand
+- A MITM attack on the FC-1's tunnel does not compromise the DCU's SSH session
+  (separate keys, separate trust chain)
+
+For maximum security, FC-1 devices running OpenSSH (instead of Dropbear) should
+use the CA trust model identically to the DCU.
+
+#### 4.5.8 Key Rotation Procedure
+
+When the bastion's SSH host key needs to rotate (planned rotation, key
+compromise, or infrastructure migration):
+
+**With CA trust (recommended):**
+1. Generate new host key on bastion: `ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key`
+2. Sign the new key with the CA: `ssh-keygen -s imatrix_ssh_ca -I "bastion-dev" -h -n "bastion-dev.imatrixsys.com" -V +52w -z 2 /etc/ssh/ssh_host_ed25519_key.pub`
+3. Install the new certificate: copy to `/etc/ssh/ssh_host_ed25519_key-cert.pub`
+4. Restart sshd
+5. **No device updates needed** — the CA public key in firmware is unchanged
+
+**With static pinning (legacy):**
+1. Generate new host key on bastion
+2. Build new firmware with updated `known_hosts`
+3. OTA deploy to every device in the fleet
+4. Wait for all devices to update
+5. Only then decommission the old key
+
+**CA rotation** (rare — only if CA private key is compromised):
+1. Generate new CA key pair
+2. Re-sign all bastion host keys with new CA
+3. Build firmware with new CA public key in `ssh_ca.pub` and `known_hosts`
+4. OTA deploy to fleet
+5. Overlap period: both old and new CA trusted in `known_hosts` for 90 days
+
+#### 4.5.9 Certificate Validity and Renewal
+
+Host certificates have an expiration date set by the `-V` flag during signing.
+**The operations team must renew (re-sign) host certificates before they expire.**
+
+Recommended schedule:
+- **Certificate validity:** 52 weeks (1 year)
+- **Renewal:** At 44 weeks (8 weeks before expiry)
+- **Monitoring:** Cron job on bastion checks certificate expiry weekly:
+
+```bash
+#!/bin/bash
+# /etc/cron.weekly/check-ssh-cert
+CERT=/etc/ssh/ssh_host_ed25519_key-cert.pub
+WARN_DAYS=60
+
+if [ ! -f "$CERT" ]; then
+    echo "ERROR: SSH host certificate not found" | logger -t ssh-cert-check
+    exit 1
+fi
+
+EXPIRY=$(ssh-keygen -L -f "$CERT" | grep "Valid:" | grep -oP "to \K[0-9T:-]+")
+EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s)
+NOW_EPOCH=$(date +%s)
+DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
+
+if [ "$DAYS_LEFT" -lt "$WARN_DAYS" ]; then
+    echo "WARNING: SSH host certificate expires in $DAYS_LEFT days" | logger -t ssh-cert-check -p warning
+fi
+```
+
+#### 4.5.10 Security Analysis: CA vs Static Pinning
+
+| Threat | Static Pinning | CA Trust |
+|---|---|---|
+| Bastion key compromise | Fleet-wide firmware update required | Re-sign new key with CA, no device update |
+| Bastion infrastructure migration | Fleet-wide firmware update required | Sign new server's key with CA |
+| CA key compromise | N/A | Fleet-wide firmware update required (rare) |
+| MITM with forged host key | Rejected (key mismatch) | Rejected (no valid CA signature) |
+| MITM with stolen bastion key | Accepted (same key) | Accepted (same key) — revocation needed |
+| Expired certificate | N/A (keys don't expire) | Connection rejected until renewed |
+| Multi-bastion deployment | Multiple keys in known_hosts | Single CA, all bastions signed |
+
+**Recommendation:** CA trust is strongly preferred for production fleets.
+Static pinning is acceptable only for development and small deployments
+(< 10 devices) where firmware updates are trivial.
+
+#### 4.5.11 Implementation Checklist for New DCU
+
+- [ ] Obtain the iMatrix SSH CA public key from the operations team
+- [ ] Embed CA public key in firmware at `/etc/phonehome/ssh_ca.pub`
+- [ ] Write `known_hosts` with `@cert-authority` entry during OS image build
+- [ ] Verify `phonehome-connect.sh` uses `StrictHostKeyChecking=yes`
+- [ ] Verify the bastion has a valid host certificate (not expired)
+- [ ] Test: connection succeeds with valid certificate
+- [ ] Test: connection fails with unsigned host key (revoke certificate, try connecting)
+- [ ] Test: connection fails with expired certificate
+- [ ] Document the CA public key hash in the device manufacturing record
 
 ---
 
@@ -1599,3 +1918,4 @@ Before integrating, review these existing files and APIs in your DoIP server cod
 | DEC-09 | Cellular PMTU black hole | **Resolved.** ppp0 MTU set to 1400 + tcp_mtu_probing=1 on cellular connect. Carriers silently drop packets > real path MTU. | 2026-03-27 |
 | DEC-10 | ForceCommand for tunnel user | **Resolved.** Must use sleep infinity, not /bin/false. /bin/false exits immediately, causing sshd to close the session and drop reverse port forwards. | 2026-03-27 |
 | DEC-11 | Provisioning token (JWT) for DCU registration | **Removed.** Direct DCU→bastion HTTPS registration was superseded by FC-1 CoAP proxy registration. No manufacturing-time tokens needed. | 2026-03-27 |
+| DEC-12 | SSH host key trust model | **CA trust recommended for fleet.** Static pinning acceptable for dev/small deployments. @cert-authority in known_hosts, OpenSSH >= 5.4 required on DCU. Dropbear (FC-1) uses TOFU. | 2026-03-28 |

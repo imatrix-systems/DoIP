@@ -207,6 +207,19 @@ int phonehome_config_load(phonehome_config_t *cfg, const char *path)
             strncpy(cfg->bastion_client_key, value, sizeof(cfg->bastion_client_key) - 1);
             cfg->bastion_client_key[sizeof(cfg->bastion_client_key) - 1] = '\0';
         }
+        else if (strcmp(key, "SSH_CA_PUBKEY") == 0) {
+            /* Empty = static pinning (normal, not an error). Validate non-empty values. */
+            if (value[0] == '\0') {
+                /* Intentionally empty — static host key pinning mode */
+            } else if (strncmp(value, "ssh-", 4) != 0) {
+                LOG_ERROR("phonehome: SSH_CA_PUBKEY invalid format (must start with 'ssh-')");
+            } else if (strchr(value, '\n') != NULL || strchr(value, '\r') != NULL) {
+                LOG_ERROR("phonehome: SSH_CA_PUBKEY contains newline (possible injection)");
+            } else {
+                strncpy(cfg->ssh_ca_pubkey, value, sizeof(cfg->ssh_ca_pubkey) - 1);
+                cfg->ssh_ca_pubkey[sizeof(cfg->ssh_ca_pubkey) - 1] = '\0';
+            }
+        }
         else if (strcmp(key, "SSH_USER") == 0) {
             strncpy(cfg->ssh_user, value, sizeof(cfg->ssh_user) - 1);
             cfg->ssh_user[sizeof(cfg->ssh_user) - 1] = '\0';
@@ -231,6 +244,96 @@ int phonehome_config_load(phonehome_config_t *cfg, const char *path)
         return -1;
     }
 
+    return 0;
+}
+
+/* ============================================================================
+ * SSH Known Hosts Management
+ * ========================================================================== */
+
+/**
+ * @brief Write /etc/phonehome/known_hosts — CA mode or static pinning
+ *
+ * When SSH_CA_PUBKEY is configured, writes an @cert-authority entry that
+ * tells OpenSSH to verify the bastion's host certificate against the CA
+ * instead of matching a specific host key. This eliminates fleet-wide
+ * firmware updates when the bastion host key rotates.
+ *
+ * Uses atomic temp+rename to prevent corruption on power loss.
+ * Compare-before-write avoids unnecessary flash wear.
+ *
+ * @param cfg  Phone-home configuration (must not be NULL)
+ * @return 0 on success or no-op, -1 on write error (non-fatal)
+ */
+static int phonehome_write_known_hosts(const phonehome_config_t *cfg)
+{
+    const char *path     = "/etc/phonehome/known_hosts";
+    const char *tmp_path = "/etc/phonehome/known_hosts.tmp";
+    char line[600];
+
+    if (cfg->ssh_ca_pubkey[0] != '\0') {
+        /* CA trust mode: @cert-authority <pattern> <ca_pubkey> */
+        snprintf(line, sizeof(line),
+                 "@cert-authority *.imatrixsys.com %s\n", cfg->ssh_ca_pubkey);
+        LOG_INFO("phonehome: SSH trust mode: CA (@cert-authority *.imatrixsys.com)");
+    } else {
+        /* Static pinning mode — known_hosts managed by firmware build
+         * or FC-1 provisioning. Do not overwrite. */
+        LOG_INFO("phonehome: SSH trust mode: static host key pinning");
+        return 0;
+    }
+
+    /* Compare-before-write — avoid unnecessary flash writes */
+    {
+        char existing[600] = "";
+        FILE *fp = fopen(path, "r");
+        if (fp) {
+            size_t n = fread(existing, 1, sizeof(existing) - 1, fp);
+            existing[n] = '\0';
+            fclose(fp);
+            if (strcmp(existing, line) == 0) {
+                return 0;  /* Already up to date */
+            }
+        }
+    }
+
+    /* Ensure directory exists */
+    if (mkdir("/etc/phonehome", 0700) != 0 && errno != EEXIST) {
+        LOG_ERROR("phonehome: cannot create /etc/phonehome: %s", strerror(errno));
+        return -1;
+    }
+
+    /* Atomic write: temp file + rename */
+    unlink(tmp_path);
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
+    if (fd < 0) {
+        LOG_ERROR("phonehome: cannot create %s: %s", tmp_path, strerror(errno));
+        return -1;
+    }
+
+    size_t len = strlen(line);
+    if (write(fd, line, len) != (ssize_t)len) {
+        LOG_ERROR("phonehome: write %s failed: %s", tmp_path, strerror(errno));
+        close(fd);
+        unlink(tmp_path);
+        return -1;
+    }
+
+    if (fsync(fd) != 0) {
+        LOG_ERROR("phonehome: fsync %s failed: %s", tmp_path, strerror(errno));
+        close(fd);
+        unlink(tmp_path);
+        return -1;
+    }
+    close(fd);
+
+    if (rename(tmp_path, path) != 0) {
+        LOG_ERROR("phonehome: rename %s -> %s failed: %s", tmp_path, path, strerror(errno));
+        unlink(tmp_path);
+        return -1;
+    }
+
+    LOG_INFO("phonehome: wrote %s (%zu bytes, CA trust)", path, len);
     return 0;
 }
 
@@ -309,6 +412,11 @@ int phonehome_init(const phonehome_config_t *cfg)
 
     LOG_INFO("phonehome: initialized (HMAC secret loaded, script=%s)",
              cfg->connect_script);
+
+    /* Write known_hosts for SSH CA trust or static pinning.
+     * Non-fatal — if it fails, the tunnel script falls back to existing known_hosts. */
+    phonehome_write_known_hosts(cfg);
+
     return 0;
 }
 

@@ -35,6 +35,7 @@ typedef struct {
     char lock_file[256];            /* Path to tunnel lock file */
     char bastion_client_key[512];   /* Bastion SSH client pubkey (installed in imatrix authorized_keys) */
     char ssh_user[64];              /* SSH user for bastion inbound connection (default: imatrix) */
+    char ssh_ca_pubkey[512];        /* SSH CA public key (empty = static host key pinning) */
 } phonehome_config_t;
 
 /** Phone-home status snapshot (for CLI display) */
