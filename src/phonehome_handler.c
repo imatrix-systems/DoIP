@@ -271,17 +271,11 @@ static int phonehome_write_known_hosts(const phonehome_config_t *cfg)
     const char *tmp_path = "/etc/phonehome/known_hosts.tmp";
     char line[600];
 
-    if (cfg->ssh_ca_pubkey[0] != '\0') {
-        /* CA trust mode: @cert-authority <pattern> <ca_pubkey> */
-        snprintf(line, sizeof(line),
-                 "@cert-authority *.imatrixsys.com %s\n", cfg->ssh_ca_pubkey);
-        LOG_INFO("phonehome: SSH trust mode: CA (@cert-authority *.imatrixsys.com)");
-    } else {
-        /* Static pinning mode — known_hosts managed by firmware build
-         * or FC-1 provisioning. Do not overwrite. */
-        LOG_INFO("phonehome: SSH trust mode: static host key pinning");
-        return 0;
-    }
+    /* CA trust mode: @cert-authority <pattern> <ca_pubkey>
+     * SSH_CA_PUBKEY is mandatory — validated in phonehome_init() */
+    snprintf(line, sizeof(line),
+             "@cert-authority *.imatrixsys.com %s\n", cfg->ssh_ca_pubkey);
+    LOG_INFO("phonehome: SSH trust mode: CA (@cert-authority *.imatrixsys.com)");
 
     /* Compare-before-write — avoid unnecessary flash writes */
     {
@@ -399,6 +393,17 @@ int phonehome_init(const phonehome_config_t *cfg)
     }
     if (strncmp(cfg->bastion_client_key, "ssh-", 4) != 0) {
         LOG_ERROR("phonehome: BASTION_CLIENT_KEY invalid format (must start with 'ssh-')");
+        explicit_bzero(hmac_secret, sizeof(hmac_secret));
+        return -1;
+    }
+
+    /* Require SSH CA public key — enables certificate-based host verification.
+     * Without this, the DCU cannot verify the bastion's identity securely.
+     * Get the key from the operations team: cat imatrix_ssh_ca.pub */
+    if (cfg->ssh_ca_pubkey[0] == '\0') {
+        LOG_ERROR("phonehome: SSH_CA_PUBKEY not configured in phonehome.conf");
+        LOG_ERROR("phonehome: Get the CA public key from the operations team: cat imatrix_ssh_ca.pub");
+        LOG_ERROR("phonehome: Phone-home DISABLED — cannot verify bastion identity without SSH CA key");
         explicit_bzero(hmac_secret, sizeof(hmac_secret));
         return -1;
     }
