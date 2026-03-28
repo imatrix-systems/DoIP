@@ -1449,140 +1449,19 @@ or in CLI:
 
 #### Complete Phone-Home Trigger Flow
 
-```mermaid
-sequenceDiagram
-    participant Op as Operator (Web UI)
-    participant B as Bastion Server
-    participant Cloud as iMatrix Cloud
-    participant FC1 as FC-1 Gateway
-    participant DCU as DCU (DoIP Server)
-
-    Op->>B: Click "Connect" on DCU
-    B->>Cloud: CoAP POST /remote_call_home/{can_sn}
-    Cloud->>FC1: CoAP POST (via DTLS session)
-
-    Note over FC1: CoAP handler fires
-    FC1->>FC1: Generate 8-byte nonce
-    FC1->>FC1: HMAC-SHA256(secret, nonce)
-    FC1->>FC1: Build 0xF0A0 PDU (73 bytes)
-
-    FC1->>DCU: DoIP UDP broadcast (discovery)
-    DCU-->>FC1: Vehicle ID Response
-    FC1->>DCU: DoIP TCP connect + routing activation
-    FC1->>DCU: Diagnostic Message: SID 0x31 (RoutineControl 0xF0A0)
-
-    Note over DCU: phonehome_handle_routine()
-    DCU->>DCU: [STEP 1] Extract nonce
-    DCU->>DCU: [STEP 2] Compute HMAC
-    DCU->>DCU: [STEP 3] Verify HMAC (constant-time)
-    DCU->>DCU: [STEP 4] Check replay cache
-    DCU->>DCU: [STEP 5] Extract bastion host:port
-    DCU->>DCU: [STEP 6] Spawn phonehome-connect.sh
-    DCU-->>FC1: Positive Response: 0x71 (routineRunning)
-
-    Note over DCU: phonehome-connect.sh
-    DCU->>B: SSH -R 10017:localhost:22 tunnel@bastion
-    B-->>DCU: SSH session established
-
-    Note over B: Port 10017 now listening
-    B->>DCU: SSH through tunnel (port 10017)
-    DCU-->>B: Shell access
-    B-->>Op: Web terminal connected
-```
+![Phone-Home Trigger Flow](diagrams/phonehome_trigger_flow.png)
 
 #### Zero-Touch Provisioning Flow
 
-```mermaid
-sequenceDiagram
-    participant FC1 as FC-1 Gateway
-    participant Cloud as iMatrix Cloud
-    participant B as Bastion Server
-    participant DCU as DCU (DoIP Server)
-
-    Note over FC1: Boot sequence
-    FC1->>FC1: Generate HMAC secret (first boot)
-    FC1->>FC1: Generate SSH key pair (first boot)
-
-    Note over FC1: DTLS session established
-    FC1->>Cloud: CoAP PUT remote-access/register/{fc1_sn}
-    Cloud->>B: Proxy registration
-    B-->>Cloud: {tunnel_port, bastion_pubkey, bastion_client_pubkey}
-    Cloud-->>FC1: Registration response
-
-    FC1->>FC1: Save bastion host key (known_hosts)
-    FC1->>FC1: Install bastion client key (authorized_keys)
-    FC1->>FC1: Extract tunnel.sh script
-    FC1->>B: SSH reverse tunnel (persistent)
-
-    Note over FC1: DoIP discovery on eth0
-    FC1->>DCU: UDP broadcast: Vehicle ID Request
-    DCU-->>FC1: Vehicle ID Response (192.168.7.101:13400)
-    FC1->>DCU: TCP connect + routing activation
-
-    Note over FC1: Provision PDU (0xF0A1)
-    FC1->>DCU: SID 0x31: HMAC secret + bastion host + client key
-    DCU->>DCU: Store HMAC secret (atomic write)
-    DCU->>DCU: Create SSH user (imatrix + root)
-    DCU->>DCU: Install bastion client key
-    DCU->>DCU: Generate SSH key pair
-    DCU-->>FC1: Positive response + DCU public key
-
-    Note over FC1: Register DCU with bastion
-    FC1->>Cloud: CoAP PUT remote-access/register/{can_sn}
-    Cloud->>B: Proxy DCU registration
-    B-->>Cloud: {tunnel_port: 10017}
-    Cloud-->>FC1: DCU tunnel port assigned
-
-    Note over FC1: Enable NAT
-    FC1->>FC1: iptables MASQUERADE eth0 → ppp0
-    FC1->>FC1: MSS clamp --set-mss 1360
-
-    Note over FC1: Health check loop
-    FC1->>DCU: SID 0x31: Status query (0xF0A2)
-    DCU-->>FC1: Status: 0x00 (fully provisioned)
-```
+![Provisioning Flow](diagrams/provisioning_flow_detail.png)
 
 #### Network Path for DCU Tunnel
 
-```mermaid
-graph LR
-    DCU[DCU<br/>192.168.7.101:22] -->|eth0| FC1[FC-1<br/>192.168.7.1]
-    FC1 -->|NAT/MASQUERADE| PPP0[ppp0<br/>Cellular]
-    PPP0 -->|MTU 1400<br/>MSS 1360| Internet((Internet))
-    Internet --> Bastion[Bastion<br/>34.136.241.1:22]
-
-    style DCU fill:#f9f,stroke:#333
-    style FC1 fill:#bbf,stroke:#333
-    style Bastion fill:#bfb,stroke:#333
-
-    subgraph "Reverse SSH Tunnel"
-        Bastion -->|port 10017| DCU
-    end
-```
+![Network Path](diagrams/network_path.png)
 
 #### Connection Sharing Decision Tree
 
-```mermaid
-flowchart TD
-    A[FC-1 Boot] --> B{DoIP server<br/>discovered?}
-    B -->|No| C[Retry discovery<br/>every 30s]
-    B -->|Yes| D[Send provision<br/>PDU 0xF0A1]
-    D --> E{Provision<br/>accepted?}
-    E -->|No| F[Retry up to<br/>3 times]
-    E -->|Yes| G{use_connection_sharing<br/>in config?}
-    G -->|Yes| H[apply_all_connection_sharing]
-    G -->|No| I{NAT already<br/>active?}
-    I -->|Yes| J[Log: already active]
-    I -->|No| K{WAN interface<br/>available?}
-    K -->|ppp0| L[Force enable:<br/>eth0 → ppp0]
-    K -->|wlan0| M[Force enable:<br/>eth0 → wlan0]
-    K -->|None| N[Log WARNING:<br/>DCU has no internet]
-    H --> O[NAT active]
-    L --> O
-    M --> O
-    J --> O
-    O --> P[DCU can reach bastion<br/>Phone-home ready]
-```
+![NAT Decision Tree](diagrams/nat_decision_tree.png)
 
 ---
 
