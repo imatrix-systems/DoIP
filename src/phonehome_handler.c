@@ -969,15 +969,29 @@ int phonehome_handle_provision(const uint8_t *uds_data, uint32_t uds_len,
         }
 
         /*
-         * Positive response with public key appended.
-         * Format: 71 01 F0 A1 00 <pubkey_string_null_terminated>
-         * The FC-1 extracts the pubkey and registers it with the bastion.
+         * Positive response with public key and optional ssh_user appended.
+         * Format: 71 01 F0 A1 00 <pubkey\0> [<ssh_user\0>]
+         * The FC-1 extracts the pubkey and ssh_user, then registers with the bastion.
          */
         if (pubkey_len > 0) {
             LOG_INFO("phonehome: [PROV STEP 6] Returning DCU pubkey (%zu bytes) in response",
                      pubkey_len);
         }
-        size_t resp_len = 5 + pubkey_len + (pubkey_len > 0 ? 1 : 0); /* +1 for null */
+
+        /* Include ssh_user if configured and not default "imatrix" */
+        const char *ssh_user = g_cfg ? g_cfg->ssh_user : "";
+        size_t ssh_user_len = 0;
+        bool include_ssh_user = (ssh_user[0] != '\0' &&
+                                  strcmp(ssh_user, "imatrix") != 0 &&
+                                  strcmp(ssh_user, "tunnel") != 0);
+        if (include_ssh_user) {
+            ssh_user_len = strlen(ssh_user);
+        }
+
+        size_t resp_len = 5 + pubkey_len + (pubkey_len > 0 ? 1 : 0);
+        if (include_ssh_user && pubkey_len > 0) {
+            resp_len += ssh_user_len + 1; /* +1 for null terminator */
+        }
         if (resp_size < resp_len) return -1;
 
         response[0] = 0x71;    /* RoutineControl positive response */
@@ -990,6 +1004,12 @@ int phonehome_handle_provision(const uint8_t *uds_data, uint32_t uds_len,
             memcpy(response + 5, pubkey_buf, pubkey_len + 1); /* include null */
             LOG_INFO("phonehome: returning pubkey (%zu bytes) in response for FC-1 registration",
                      pubkey_len);
+
+            /* Append ssh_user after pubkey null terminator */
+            if (include_ssh_user) {
+                memcpy(response + 5 + pubkey_len + 1, ssh_user, ssh_user_len + 1);
+                LOG_INFO("phonehome: returning ssh_user '%s' in response", ssh_user);
+            }
         } else {
             LOG_WARN("phonehome: no public key available — FC-1 cannot register DCU");
         }
