@@ -174,9 +174,11 @@ Review files in `~/iMatrix/DOIP/fci-review-code-*-r2.md`.
 
 ## 4. Open Issues
 
-### Issue #1: `LOCAL_SSH_PORT` in `phonehome-connect.sh` — NEEDS DECISION
+### Issue #1: `LOCAL_SSH_PORT` in `phonehome-connect.sh` — RESOLVED
 
-**Status:** Changed from 22 to 22222, but correctness depends on target device.
+**Status:** RESOLVED (2026-03-19). Tunnel targets the DCU's own SSH port (22). End-to-end validated with Bastion web terminal on 2026-03-27.
+
+**Original issue (for history):** Changed from 22 to 22222, but correctness depends on target device.
 
 The connect script runs on the **DCU** and opens a reverse tunnel:
 ```
@@ -205,7 +207,7 @@ is wrong — nothing is listening on the port being forwarded to.
 
 ### Issue #2: Web Terminal — Blank Screen on Connect
 
-**Status:** INVESTIGATING
+**Status:** RESOLVED (2026-03-19). Root cause was SSH authentication mismatch between Bastion and CAN-Test. See `docs/DoIP_Diagnosis_Plan.md` for the diagnosis and fix.
 
 Screenshot `debug/b1.png` shows the web-ssh-bastion terminal page connected to
 device 0131557250 (FC-1) but displaying nothing — no banner, no prompt, no
@@ -239,30 +241,30 @@ script path, and lock file location.
 
 ### Issue #4: FC-1 Phone-Home Relay Not Yet Triggered End-to-End
 
-**Status:** NOT TESTED
+**Status:** RESOLVED (2026-03-27). Full end-to-end chain validated: FC-1 + DCU + Bastion web terminal.
 
-The provisioning path (FC-1 → DCU HMAC secret) is verified. The full trigger
-path (Cloud CoAP → FC-1 → DCU → reverse tunnel → bastion → web terminal) has
-NOT been tested end-to-end. The blank screen issue (Issue #2) blocks this.
+The provisioning path (FC-1 → DCU HMAC secret) and full trigger
+path (Cloud CoAP → FC-1 → DCU → reverse tunnel → bastion → web terminal)
+have been tested and validated end-to-end.
 
 ---
 
 ## 5. Deployment State
 
-### CAN-Test (DCU, 192.168.7.100)
+### CAN-Test (DCU, 192.168.7.101)
 
-- **Binary:** `/tmp/doip-server` (new version with provisioning support)
+- **Binary:** `/tmp/doip-server` (with provisioning + status query support)
 - **Config:** `/etc/doip/doip-server.conf` (`bind_address=0.0.0.0`)
 - **HMAC secret:** `/etc/phonehome/hmac_secret` (32 bytes, provisioned by FC-1)
-- **phonehome.conf:** NOT present (uses `g_provision_cfg` defaults)
-- **SSH keys:** NOT deployed (`/etc/phonehome/id_ed25519` missing)
-- **Status:** Was running, currently offline (192.168.7.100 unreachable)
+- **phonehome.conf:** Uses `g_provision_cfg` defaults
+- **SSH:** greg / Sierra007!
+- **Note:** IP was 192.168.7.100 at time of initial review (2026-03-12), updated to .101 (static, MAC f4:4d:30:65:f0:37)
 
 ### FC-1 (192.168.7.1)
 
 - **Binary:** `/usr/qk/bin/FC-1` (new version with provisioning code)
 - **HMAC secret:** `/etc/phonehome/hmac_secret` (32 bytes, test key)
-- **DoIP state:** CONNECTED to 192.168.7.100:13400
+- **DoIP state:** CONNECTED to 192.168.7.101:13400
 - **Provisioning:** Completed successfully (CAN SN 281183743)
 
 ### Bastion (tunnel-bastion)

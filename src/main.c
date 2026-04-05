@@ -289,7 +289,7 @@ static int handle_transfer_data(const uint8_t *uds_data, uint32_t uds_len,
 
     if (g_transfer.bytes_received + data_in_block > g_transfer.memory_size) {
         LOG_WARN("TransferData exceeds requested size");
-        return build_negative_response(sid, 0x71, response, resp_size); /* requestOutOfRange */
+        return build_negative_response(sid, 0x71, response, resp_size); /* transferDataSuspended */
     }
 
     /* Copy data into reassembly buffer */

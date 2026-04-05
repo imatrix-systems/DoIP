@@ -52,10 +52,12 @@ All discovery responses use payload type `0x0004` (Vehicle Announcement) with th
 
 | Field | Value |
 |-------|-------|
-| VIN | `FC1BLOBSRV0000001` |
+| VIN | `APTERADOIPSRV0001` |
 | Logical Address | `0x0001` |
 | EID | `00:1A:2B:3C:4D:5E` |
 | GID | `00:1A:2B:3C:4D:5E` |
+
+**Compiled defaults** (when no config file is loaded): VIN = `FC1BLOBSRV0000001`. The shipped `doip-server.conf` overrides this.
 
 These are configurable — always validate against the deployed configuration.
 
@@ -232,9 +234,23 @@ The server treats the **last 4 bytes** of the transferred data as a little-endia
 | requestSequenceError | `0x24` | No active transfer |
 | generalProgrammingFailure | `0x72` | CRC-32 mismatch |
 
-### 4.5 Unsupported Services
+### 4.5 RoutineControl (`0x31`)
 
-Any SID other than `0x34`, `0x36`, `0x37`, `0x3E` returns:
+The server handles UDS RoutineControl (SID 0x31, subFunction 0x01) for the phone-home subsystem. Three routine identifiers are supported:
+
+| routineId | Name | Description |
+|-----------|------|-------------|
+| `0xF0A0` | Phone-Home Trigger | HMAC-authenticated reverse SSH tunnel trigger |
+| `0xF0A1` | Provisioning | Receive HMAC secret + CAN SN from FC-1 |
+| `0xF0A2` | Status Query | Returns provisioning state, uptime, tunnel status |
+
+See `docs/DCU_PhoneHome_Specification.md` for PDU formats and security details. These routines are only relevant to phone-home integration — blob transfer clients do not need to use them.
+
+Unrecognized routine IDs return NRC `0x12` (subFunctionNotSupported). SubFunction values other than `0x01` also return NRC `0x12`.
+
+### 4.6 Unsupported Services
+
+Any SID other than `0x31`, `0x34`, `0x36`, `0x37`, `0x3E` returns:
 
 ```
 7F [SID] 11

@@ -1,7 +1,7 @@
 # Plan: FC-1 Periodic DCU Provisioning Health Check
 
 **Date:** 2026-03-20
-**Status:** PLAN — needs review before implementation
+**Status:** IMPLEMENTED — `phonehome_handle_status()` in `phonehome_handler.c`, dispatched from `main.c` for routineId 0xF0A2
 
 ---
 

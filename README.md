@@ -297,8 +297,8 @@ daemon_mode         = false
 pid_file            = /var/run/doip-server.pid
 script_output_dir   = /etc/doip/scripts
 
-# Phone-Home config path (uncomment to enable phone-home capability)
-# phonehome_config  = /etc/phonehome/phonehome.conf
+# Phone-Home config path
+phonehome_config    = /etc/phonehome/phonehome.conf
 ```
 
 **Config loading behavior:**
@@ -426,7 +426,7 @@ Run the test tool in another:
 
 | Service | SID | Description |
 |---------|-----|-------------|
-| RoutineControl | 0x31 | Phone-home trigger (routineId 0xF0A0) |
+| RoutineControl | 0x31 | Phone-home trigger (0xF0A0), provisioning (0xF0A1), status (0xF0A2) |
 | RequestDownload | 0x34 | Initiate blob transfer |
 | TransferData | 0x36 | Receive blob chunks |
 | RequestTransferExit | 0x37 | Finalize, verify CRC-32, store to disk |
