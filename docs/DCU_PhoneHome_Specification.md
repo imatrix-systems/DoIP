@@ -1723,6 +1723,55 @@ phonehome: Phone-home DISABLED — bastion cannot authenticate to DCU without th
 **Fix:** Get the key: `cat /opt/web-ssh-bastion/bastion_key.pub` on the bastion,
 then add it to `BASTION_CLIENT_KEY=` in phonehome.conf.
 
+#### SSH Permission Denied on First Trigger After Boot
+```
+tunnel@bastion-dev.imatrixsys.com: Permission denied (publickey).
+```
+**Cause:** Race condition — the FC-1 relayed the phone-home trigger to the DCU
+before registering the DCU's SSH public key with the bastion. The DCU spawned
+the reverse SSH tunnel immediately, but the bastion didn't have the key in
+`authorized_keys` yet.
+
+**Timeline of the race:**
+```
+T+0.0s  FC-1 sends trigger PDU → DCU
+T+0.0s  DCU validates HMAC, spawns SSH tunnel
+T+0.1s  SSH fails: Permission denied (bastion doesn't have key yet)
+T+5.0s  FC-1 registers DCU key with bastion (too late)
+```
+
+**Fix (applied 2026-04-04):** Two changes in `remote_access.c`:
+1. DCU key registration moved from `state_idle()` to `remote_access_process()`
+   so it runs every loop iteration regardless of FC-1 tunnel state
+2. Guard added in `relay_dcu_phonehome()` that defers the trigger if
+   `dcu_key_pending && !dcu_key_registered` (re-arms flag for next iteration)
+
+**Verification:** After the fix, re-trigger phone-home. The FC-1 log should show:
+```
+doip_relay: DCU relay deferred — key not yet registered with bastion
+```
+followed by (next iteration, after registration completes):
+```
+doip_relay: DCU phone-home relay OK — tunnel initiating
+```
+
+#### DCU Re-Provision Loop (Infinite Provisioning)
+```
+doip_relay: DCU pubkey registered with bastion
+doip_relay: re-provisioning DCU with bastion client key
+doip_relay: provision OK — HMAC secret delivered to DCU
+doip_relay: DCU pubkey registered with bastion     ← repeats endlessly
+```
+**Cause:** Every provision response from the DCU includes the DCU SSH pubkey,
+which unconditionally set `dcu_key_pending = true`, restarting the registration
+cycle even though the key was already registered.
+
+**Fix (applied 2026-04-04):** Only set `dcu_key_pending = true` if
+`!ctx.dcu_key_registered`. After the fix, the FC-1 log should show:
+```
+doip_relay: DCU pubkey received (94 bytes), already registered
+```
+
 #### Connection Sharing Not Active
 ```
 doip_relay: connection sharing not configured — force-enabling on eth0

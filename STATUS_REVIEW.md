@@ -247,31 +247,63 @@ The provisioning path (FC-1 → DCU HMAC secret) and full trigger
 path (Cloud CoAP → FC-1 → DCU → reverse tunnel → bastion → web terminal)
 have been tested and validated end-to-end.
 
+### Issue #5: DCU Phone-Home Key Registration Race Condition
+
+**Status:** RESOLVED (2026-04-04). Two bugs found and fixed in `remote_access.c`.
+
+**Symptom:** First phone-home trigger after FC-1 boot fails with:
+```
+tunnel@bastion-dev.imatrixsys.com: Permission denied (publickey).
+```
+
+**Root cause 1 — Race condition:** DCU key registration with bastion only ran
+in `state_idle()`, but triggers could fire from `state_connected()`. The trigger
+was relayed before the bastion had the DCU's SSH key in `authorized_keys`.
+
+**Fix 1:** Extracted DCU registration into `process_dcu_registration()`, called
+from `remote_access_process()` every loop iteration regardless of state. Added
+guard in `relay_dcu_phonehome()` that defers trigger (re-arms flag) if
+`dcu_key_pending && !dcu_key_registered`.
+
+**Root cause 2 — Re-provision loop:** Every provision response set
+`dcu_key_pending = true` unconditionally, even when the key was already
+registered. Combined with `process_dcu_registration()` running every iteration,
+this caused an infinite provision → register → re-provision cycle.
+
+**Fix 2:** Only set `dcu_key_pending = true` if `!ctx.dcu_key_registered`.
+
+**Review:** 12/12 PASS (6 plan + 6 code agents, all first iteration).
+Files: `fci-review-plan-*.md`, `fci-review-code-*.md` in `~/iMatrix/DOIP/`.
+
 ---
 
 ## 5. Deployment State
 
 ### CAN-Test (DCU, 192.168.7.101)
 
-- **Binary:** `/tmp/doip-server` (with provisioning + status query support)
-- **Config:** `/etc/doip/doip-server.conf` (`bind_address=0.0.0.0`)
+- **Binary:** `~/DoIP/bin/doip-server` v1.2.0.39 (with provisioning + status query + SSH CA support)
+- **Config:** `~/DoIP/doip-server.conf` (`bind_address=0.0.0.0`)
 - **HMAC secret:** `/etc/phonehome/hmac_secret` (32 bytes, provisioned by FC-1)
-- **phonehome.conf:** Uses `g_provision_cfg` defaults
+- **phonehome.conf:** `/etc/phonehome/phonehome.conf` (SSH_USER=imatrix, SSH CA configured)
+- **SSH users:** `imatrix` + `root` both have bastion client key in `authorized_keys`
 - **SSH:** greg / Sierra007!
 - **Note:** IP was 192.168.7.100 at time of initial review (2026-03-12), updated to .101 (static, MAC f4:4d:30:65:f0:37)
+- **Start command:** `cd ~/DoIP && sudo nohup ./bin/doip-server -v >> log/server.log 2>&1 &`
 
 ### FC-1 (192.168.7.1)
 
-- **Binary:** `/usr/qk/bin/FC-1` (new version with provisioning code)
-- **HMAC secret:** `/etc/phonehome/hmac_secret` (32 bytes, test key)
+- **Binary:** `/usr/qk/bin/FC-1` (with key registration race fix, 2026-04-04)
+- **HMAC secret:** `/usr/qk/etc/sv/FC-1/hmac_secret` (32 bytes, yaffs2 persistent)
 - **DoIP state:** CONNECTED to 192.168.7.101:13400
-- **Provisioning:** Completed successfully (CAN SN 281183743)
+- **Provisioning:** Completed successfully (CAN SN 186137189)
+- **DCU key:** Registered with bastion (tunnel_port=10017)
 
 ### Bastion (tunnel-bastion)
 
-- **web-ssh-bastion:** Deployed with terminal fix (browser-driven sizing)
-- **sshd:** Hardened config active, tunnel user restricted
-- **Status:** Running, but terminal shows blank screen (Issue #2)
+- **web-ssh-bastion:** Deployed with terminal fix + SSH CA cert
+- **sshd:** Hardened config active, tunnel user restricted, HostCertificate configured
+- **DCU key:** In `/home/tunnel/.ssh/authorized_keys` (device:0186137189:dcu)
+- **Status:** Running, end-to-end phone-home validated (2026-04-04)
 
 ---
 
