@@ -835,6 +835,14 @@ int phonehome_handle_provision(const uint8_t *uds_data, uint32_t uds_len,
      */
     pthread_mutex_lock(&hmac_mutex);
 
+    /* Save ssh_user from current config BEFORE memset zeroes g_provision_cfg.
+     * After the first provision, g_cfg == &g_provision_cfg, so the memset
+     * below would destroy the value if we read it afterward. */
+    char saved_ssh_user[sizeof(g_provision_cfg.ssh_user)] = {0};
+    if (g_cfg && g_cfg->ssh_user[0] != '\0') {
+        strncpy(saved_ssh_user, g_cfg->ssh_user, sizeof(saved_ssh_user) - 1);
+    }
+
     /* Initialize g_cfg — extract bastion hostname from PDU if present */
     memset(&g_provision_cfg, 0, sizeof(g_provision_cfg));
     strncpy(g_provision_cfg.hmac_secret_path, HMAC_SECRET_PATH,
@@ -851,7 +859,14 @@ int phonehome_handle_provision(const uint8_t *uds_data, uint32_t uds_len,
      *   [42+]    Bastion hostname (null-terminated)
      *   [42+N+1] Bastion client pubkey (null-terminated, optional)
      */
-    strncpy(g_provision_cfg.ssh_user, "imatrix", sizeof(g_provision_cfg.ssh_user) - 1);
+    /* Restore ssh_user from pre-memset save, or default to "imatrix". */
+    if (saved_ssh_user[0] != '\0') {
+        strncpy(g_provision_cfg.ssh_user, saved_ssh_user,
+                sizeof(g_provision_cfg.ssh_user) - 1);
+    } else {
+        strncpy(g_provision_cfg.ssh_user, "imatrix",
+                sizeof(g_provision_cfg.ssh_user) - 1);
+    }
 
     if (uds_len > PROVISION_PDU_BASTION_OFF) {
         uint16_t bastion_port = ((uint16_t)uds_data[40] << 8) | uds_data[41];

@@ -275,6 +275,75 @@ this caused an infinite provision → register → re-provision cycle.
 **Review:** 12/12 PASS (6 plan + 6 code agents, all first iteration).
 Files: `fci-review-plan-*.md`, `fci-review-code-*.md` in `~/iMatrix/DOIP/`.
 
+### Issue #6: DCU Key Not Re-Registered After DCU Restart
+
+**Status:** RESOLVED (2026-04-14). Initial fix in v1.014.015 (flag reset), production fix in v1.014.017 (key content comparison).
+
+**Symptom:** After DCU restart, "Connect to Shell" for DCU fails with
+"Permission denied (publickey)". FC-1 logs show re-provisioning succeeds but
+key registration is skipped ("already registered").
+
+**Root cause:** Health check re-provisioning path reset `dcu_provisioned` and
+`dcu_provision_attempts` but did not reset `dcu_key_registered`. The provision
+response contained the DCU's (potentially new) pubkey, but the guard
+`if (!ctx.dcu_key_registered)` at line 2328 prevented `dcu_key_pending` from
+being set. `process_dcu_registration()` short-circuited every iteration.
+
+**Fix:** Added `ctx.dcu_key_registered = false` and `ctx.dcu_key_pending = false`
+to the health check re-provisioning handler.
+
+**Reporter:** Eric Lighthart (eric@aptera.us), 2026-04-13.
+
+### Issue #7: FC-1 Own Registration Consumed by DCU Callback
+
+**Status:** RESOLVED (2026-04-14). Fix deployed to Test #3 FC-1 (v1.014.016).
+
+**Symptom:** "Connect to Shell" for the FC-1 gateway times out. FC-1 shows
+`tunnel_port=0` even though the reverse tunnel is physically connected. The
+bastion web app cannot find the correct port for the gateway.
+
+**Root cause:** During FC-1 boot, `INIT_STEP_REGISTER_KEYS` Branch 3 checked
+`ctx.reg_state == REG_IDLE && ctx.reg_success` without verifying the success
+came from the FC-1's own registration. The DCU registration (via
+`process_dcu_registration()`) completed first and set `reg_success = true`.
+The FC-1 init step consumed this as its own success and advanced to
+`EXTRACT_SCRIPT` with `tunnel_port=0`, never sending its own CoAP PUT.
+
+**Fix:** Added `ctx.fc1_reg_sent` flag. Set when FC-1 sends its own registration
+(Branch 1/4). Required in Branch 3 before consuming `reg_success`. Prevents
+DCU callback from being mistaken for FC-1 callback.
+
+### Issue #8: Production Key Change Detection (supersedes #6 flag-only fix)
+
+**Status:** DEPLOYED (2026-04-14) as v1.014.017.
+
+**Problem:** Bug #6 fix (flag reset in health check) was incomplete — it only
+handled the health-check-triggered re-provision path. Other re-provision paths
+(Branch 3 bastion client key delivery, future paths) could still cache and
+re-register a stale key because the provision response handler used
+`dcu_key_registered` as the sole gate without comparing key content.
+
+**Production fix:** Replaced flag-only gate with `strcmp()` key comparison in the
+provision response handler. Three outcomes:
+- **Key changed** → force re-registration (pending=true, registered=false)
+- **Same key, not registered** → continue deferred registration
+- **Same key, already registered** → no action (prevents re-provision loop)
+
+Health check handler now also clears `ctx.dcu_pubkey[0]` so cache miss always
+triggers re-registration. `process_dcu_registration()` gate simplified to
+check only `dcu_key_pending` (removed redundant `dcu_key_registered` check).
+Added key prefix logging for registration tracing.
+
+### Spec Update: SSH tunnel username (v3.2.0)
+
+**Status:** Updated in DCU_PhoneHome_Specification.md v3.2.0 (2026-04-14).
+
+Section 5.3 connect script updated: `phonehome-${DCU_SERIAL}@` changed to
+`tunnel@`. All devices share the `tunnel` user for reverse SSH tunnels. The
+bastion identifies each device by SSH key comment tag in the shared
+authorized_keys file. Design note added explaining the change from v3.1.0.
+PDF regenerated with iMatrix Style Guide template.
+
 ---
 
 ## 5. Deployment State
@@ -292,18 +361,25 @@ Files: `fci-review-plan-*.md`, `fci-review-code-*.md` in `~/iMatrix/DOIP/`.
 
 ### FC-1 (192.168.7.1)
 
-- **Binary:** `/usr/qk/bin/FC-1` (with key registration race fix, 2026-04-04)
+- **Binary:** `/usr/qk/bin/FC-1` v1.014.017 (key change detection + FC-1 own reg fix, 2026-04-14)
 - **HMAC secret:** `/usr/qk/etc/sv/FC-1/hmac_secret` (32 bytes, yaffs2 persistent)
 - **DoIP state:** CONNECTED to 192.168.7.101:13400
 - **Provisioning:** Completed successfully (CAN SN 186137189)
 - **DCU key:** Registered with bastion (tunnel_port=10017)
+- **FC-1 key:** Registered with bastion (tunnel_port=10014)
 
 ### Bastion (tunnel-bastion)
 
-- **web-ssh-bastion:** Deployed with terminal fix + SSH CA cert
+- **web-ssh-bastion:** v2.3.0 + idle timeout (IDLE_TIMEOUT=1800, 30 min default)
 - **sshd:** Hardened config active, tunnel user restricted, HostCertificate configured
 - **DCU key:** In `/home/tunnel/.ssh/authorized_keys` (device:0186137189:dcu)
-- **Status:** Running, end-to-end phone-home validated (2026-04-04)
+- **Idle timeout:** Displays yellow "Timing out session due to inactivity" before disconnect
+- **docker-compose.yml:** Updated with `IDLE_TIMEOUT` env var
+- **Status:** Running, FC-1 tunnel verified from inside container (2026-04-14)
+- **FC-1 (0131557250):** Redis gateway_port=10003, tunnel listening, auth OK
+- **DCU (0281183743):** Redis gateway_port=10016, tunnel NOT listening (DCU-side issue)
+- **Pending:** `SESSION_MAX_TTL` absolute timeout (docs/zombie_issue.md)
+- **Known issue:** DCU tunnel not connecting — likely SSH username mismatch between CAN SN registration and `/etc/dcu-serial` login. See `docs/eric_test_guide_2026-04-14.md`
 
 ---
 

@@ -1,0 +1,191 @@
+% iMatrix Systems — PDF document template
+% Based on iMatrix Style Guide rev 2.0
+% Used with pandoc --template=imatrix-spec.latex
+
+\documentclass[$if(fontsize)$$fontsize$,$endif$$for(classoption)$$classoption$$sep$,$endfor$]{article}
+
+% Page geometry — generous margins to prevent clipping
+\usepackage[margin=1in, includeheadfoot]{geometry}
+
+% Font setup (XeLaTeX)
+\usepackage{fontspec}
+\setmainfont{DejaVu Sans}
+\setmonofont[Scale=0.85]{DejaVu Sans Mono}
+
+% Colors — iMatrix brand palette
+\usepackage{xcolor}
+\definecolor{imxPrimaryBlue}{HTML}{005C8C}
+\definecolor{imxAccentBlue}{HTML}{0085B4}
+\definecolor{imxLightBlue}{HTML}{D8E9F0}
+\definecolor{imxBorderBlue}{HTML}{A8D2E3}
+\definecolor{imxBackground}{HTML}{F5F9FC}
+\definecolor{imxText}{HTML}{121212}
+\definecolor{imxSecondaryText}{HTML}{555555}
+\definecolor{imxMutedText}{HTML}{888888}
+
+% Set default text color
+\color{imxText}
+
+% Links
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=imxPrimaryBlue,
+  urlcolor=imxAccentBlue,
+  citecolor=imxPrimaryBlue,
+  pdfauthor={iMatrix Systems},
+  pdftitle={$title$}
+}
+
+% Math symbols (for pandoc checkboxes \square)
+\usepackage{amssymb}
+
+% Tables
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{calc}
+
+% Pandoc 3.x uses \real{} for column widths in longtable
+\providecommand{\real}[1]{\dimexpr#1\relax}
+
+% Force tables to stay within text width
+\usepackage{tabularx}
+\let\oldlongtable\longtable
+\let\endoldlongtable\endlongtable
+
+% Graphics
+\usepackage{graphicx}
+\usepackage{grffile}
+% Pandoc 3.x image bounding — constrain to text area
+% Scales images that exceed page width or 82% of text height
+\makeatletter
+\newsavebox\pandoc@box
+\newcommand*\pandocbounded[1]{%
+  \sbox\pandoc@box{#1}%
+  \ifdim\ht\pandoc@box>0.82\textheight
+    \resizebox{!}{0.82\textheight}{#1}%
+  \else\ifdim\wd\pandoc@box>\linewidth
+    \resizebox{\linewidth}{!}{#1}%
+  \else
+    #1%
+  \fi\fi
+}
+\makeatother
+
+% Float placement — reduce oversized float warnings
+\renewcommand{\floatpagefraction}{0.7}
+\renewcommand{\textfraction}{0.1}
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.9}
+
+% Headers and footers — iMatrix blue header bar
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{imxPrimaryBlue}\textbf{$if(header-title)$$header-title$$else$iMatrix Systems$endif$}}
+\fancyhead[R]{\small\color{imxSecondaryText}\today}
+\fancyfoot[C]{\small\color{imxMutedText}\thepage}
+\renewcommand{\headrulewidth}{0.5pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{imxBorderBlue}\leaders\hrule height \headrulewidth\hfill}}
+\renewcommand{\footrulewidth}{0pt}
+
+% Section heading colors
+\usepackage{titlesec}
+\titleformat{\section}
+  {\Large\bfseries\color{imxPrimaryBlue}}{\thesection}{1em}{}
+\titleformat{\subsection}
+  {\large\bfseries\color{imxPrimaryBlue}}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}
+  {\normalsize\bfseries\color{imxPrimaryBlue}}{\thesubsubsection}{1em}{}
+\titleformat{\paragraph}[runin]
+  {\normalsize\bfseries\color{imxText}}{\theparagraph}{1em}{}
+
+% Code block styling
+\usepackage{fancyvrb}
+$if(highlighting-macros)$
+$highlighting-macros$
+$endif$
+
+% Tight lists
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+
+% Line spacing
+\usepackage{setspace}
+\setstretch{1.4}
+
+% Prevent text overflow in tables and code
+\usepackage{microtype}
+\tolerance=2000
+\emergencystretch=10pt
+
+% Note: fancyvrb breaklines not used — pandoc manages code blocks
+
+% Table of contents depth
+$if(toc-depth)$
+\setcounter{tocdepth}{$toc-depth$}
+$endif$
+
+% Section numbering depth
+\setcounter{secnumdepth}{$if(secnumdepth)$$secnumdepth$$else$3$endif$}
+
+\begin{document}
+
+% === COVER PAGE (iMatrix Style Guide compliant) ===
+\thispagestyle{empty}
+\begin{center}
+\vspace*{2cm}
+
+% Logo placeholder (text-based since SVG not available in LaTeX)
+{\Huge\color{imxPrimaryBlue}\textbf{iMatrix Systems}}
+
+\vspace{0.5cm}
+{\small\color{imxBorderBlue}\rule{200pt}{0.5pt}}
+
+\vspace{2cm}
+
+% Document title
+{\LARGE\color{imxText} $if(title)$$title$$else$Document Title$endif$}
+
+\vspace{1cm}
+
+% Version and date
+{\normalsize\color{imxPrimaryBlue}\textbf{$if(version)$$version$$else$v1.0$endif$}}
+\hspace{1em}
+{\normalsize\color{imxSecondaryText}$if(date)$$date$$else$\today$endif$}
+
+\vspace{0.5cm}
+
+% Status
+$if(status)$
+{\small\color{imxSecondaryText}$status$}
+$endif$
+
+\vfill
+
+% Copyright notice
+{\small\color{imxMutedText}\rule{300pt}{0.5pt}}\\[12pt]
+{\footnotesize\color{imxMutedText}
+\copyright\ 2026 iMatrix Systems. All rights reserved.\\
+This document is confidential and intended solely for the use of the named recipient(s).
+}
+
+\vspace{1cm}
+\end{center}
+\newpage
+
+% === TABLE OF CONTENTS ===
+$if(toc)$
+{
+\hypersetup{linkcolor=imxText}
+\setcounter{tocdepth}{$if(toc-depth)$$toc-depth$$else$3$endif$}
+\tableofcontents
+\newpage
+}
+$endif$
+
+% === BODY ===
+$body$
+
+\end{document}
